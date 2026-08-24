@@ -25,7 +25,7 @@ cargo run
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` | Move between a topic title and its entries |
+| `↑` / `↓` | Move through identity titles and entries |
 | `←` / `→`, `Tab` | Move between topics |
 | `t` | Add a topic |
 | `a` | Add an entry to the selected topic |

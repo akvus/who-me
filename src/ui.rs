@@ -603,7 +603,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
 fn footer_hints(mode: &Mode, width: u16) -> &'static str {
     match mode {
         Mode::Normal if width >= 105 => {
-            "↑↓ entries  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  ? help  q quit"
+            "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  ? help  q quit"
         }
         Mode::Normal if width >= 72 => {
             "↑↓ navigate  t new  a add  s status  ↵ edit  / search  ? help  q quit"
@@ -768,7 +768,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
     let popup = centered_rect(area, 78, 24);
     frame.render_widget(Clear, popup);
     let rows = [
-        ("↑ / ↓", "Move between an identity title and its entries"),
+        ("↑ / ↓", "Move through identity titles and entries"),
         ("← / → or Tab", "Move between identities"),
         ("t / a", "Add an identity / add an entry"),
         ("s", "Choose Aspiring, Active, or Former status"),

@@ -440,19 +440,49 @@ impl App {
             let visible = self.visible_items(self.selected_topic);
             let position = visible.iter().position(|&index| index == item).unwrap_or(0);
             self.selected_item = position.checked_sub(1).map(|position| visible[position]);
+            return;
         }
+
+        let visible_topics = self.visible_topics();
+        let Some(position) = visible_topics
+            .iter()
+            .position(|&index| index == self.selected_topic)
+        else {
+            return;
+        };
+        let Some(previous) = position.checked_sub(1) else {
+            return;
+        };
+        self.selected_topic = visible_topics[previous];
+        self.selected_item = self.visible_items(self.selected_topic).last().copied();
     }
 
     fn select_down(&mut self) {
         let visible = self.visible_items(self.selected_topic);
-        self.selected_item = match self.selected_item {
+        let next_item = match self.selected_item {
             None => visible.first().copied(),
             Some(item) => visible
                 .iter()
                 .position(|&index| index == item)
-                .and_then(|position| visible.get(position + 1).copied())
-                .or(Some(item)),
+                .and_then(|position| visible.get(position + 1).copied()),
         };
+        if let Some(item) = next_item {
+            self.selected_item = Some(item);
+            return;
+        }
+
+        let visible_topics = self.visible_topics();
+        let Some(position) = visible_topics
+            .iter()
+            .position(|&index| index == self.selected_topic)
+        else {
+            return;
+        };
+        let Some(&next_topic) = visible_topics.get(position + 1) else {
+            return;
+        };
+        self.selected_topic = next_topic;
+        self.selected_item = None;
     }
 
     fn select_topic(&mut self, direction: isize) {
@@ -641,6 +671,20 @@ mod tests {
         assert!(app.document.topics[0].items[0].done);
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.selected_item, None);
+    }
+
+    #[test]
+    fn vertical_navigation_crosses_identity_boundaries() {
+        let mut app = app();
+        app.selected_item = Some(1);
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.selected_topic, 1);
+        assert_eq!(app.selected_item, None);
+
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.selected_topic, 0);
+        assert_eq!(app.selected_item, Some(1));
     }
 
     #[test]
