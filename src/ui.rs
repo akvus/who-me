@@ -9,8 +9,9 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, DeleteTarget, EditKind, Editor, Mode, StatusPicker},
+    app::{App, DeleteTarget, EditKind, Editor, Mode, SettingsState, StatusPicker},
     model::IdentityStatus,
+    sync::SyncStatus,
     theme::{AppTheme, TopicVisual},
 };
 
@@ -44,6 +45,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         }
         Mode::SelectingStatus(picker) => render_status_picker(frame, area, *picker, theme),
         Mode::ConfirmDelete(target) => render_confirmation(frame, area, app, *target, theme),
+        Mode::Settings(settings) => render_settings(frame, area, app, settings, theme),
         Mode::Help => render_help(frame, area, theme),
         Mode::Normal => {}
     }
@@ -66,7 +68,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
             "identities"
         }
     );
-    let count_width = display_width(&count)
+    let sync = app.sync_status.label();
+    let summary = format!("{sync} · {count}");
+    let count_width = display_width(&summary)
         .saturating_add(2)
         .min(inner.width as usize) as u16;
     let [brand_area, count_area] =
@@ -102,9 +106,19 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
         brand_area,
     );
     frame.render_widget(
-        Paragraph::new(count)
-            .style(Style::default().fg(theme.muted).bg(theme.background))
-            .alignment(Alignment::Right),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                sync,
+                Style::default()
+                    .fg(sync_status_color(&app.sync_status, theme))
+                    .bg(theme.background),
+            ),
+            Span::styled(
+                format!(" · {count}"),
+                Style::default().fg(theme.muted).bg(theme.background),
+            ),
+        ]))
+        .alignment(Alignment::Right),
         count_area,
     );
 }
@@ -603,18 +617,161 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
 fn footer_hints(mode: &Mode, width: u16) -> &'static str {
     match mode {
         Mode::Normal if width >= 105 => {
-            "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  ? help  q quit"
+            "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  g sync  ? help  q quit"
         }
-        Mode::Normal if width >= 72 => {
-            "↑↓ navigate  t new  a add  s status  ↵ edit  / search  ? help  q quit"
+        Mode::Normal if width >= 80 => {
+            "↑↓ navigate  t new  a add  s status  ↵ edit  / search  g sync  ? help  q quit"
         }
-        Mode::Normal if width >= 48 => "↑↓←→ navigate  t new  s status  / search  ? help",
-        Mode::Normal => "t new  / search  ? help  q quit",
+        Mode::Normal if width >= 58 => "↑↓←→ navigate  t new  s status  / search  g sync  ? help",
+        Mode::Normal => "t new  g sync  ? help  q quit",
         Mode::Editing(_) => "↵ save  Esc cancel  ←→ cursor",
         Mode::Searching(_) => "type to filter  ↵ keep  Esc clear",
         Mode::SelectingStatus(_) => "↑↓ choose  ↵ save  Esc cancel",
         Mode::ConfirmDelete(_) => "↵ / y confirm  Esc / n cancel",
+        Mode::Settings(settings) if settings.editing => "↵ connect  Esc cancel  ←→ cursor",
+        Mode::Settings(_) => "e edit  r sync  x disconnect  g / Esc close",
         Mode::Help => "Esc / ? close",
+    }
+}
+
+fn sync_status_color(status: &SyncStatus, theme: &AppTheme) -> ratatui::style::Color {
+    match status {
+        SyncStatus::Synced => theme.green,
+        SyncStatus::Connecting | SyncStatus::Syncing | SyncStatus::Pending => theme.yellow,
+        SyncStatus::Offline(_) | SyncStatus::LocalOnly => theme.muted,
+        SyncStatus::Error(_) | SyncStatus::Conflict(_) => theme.red,
+    }
+}
+
+fn render_settings(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    settings: &SettingsState,
+    theme: &AppTheme,
+) {
+    let popup = centered_rect(area, 78, 20);
+    frame.render_widget(Clear, popup);
+    let block = overlay_block(" GitHub sync settings ", theme.accent, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let label_style = Style::default().fg(theme.muted).bg(theme.panel);
+    let value_style = Style::default().fg(theme.foreground).bg(theme.panel);
+    let status_style = Style::default()
+        .fg(sync_status_color(&app.sync_status, theme))
+        .bg(theme.panel)
+        .add_modifier(Modifier::BOLD);
+    let repository = if settings.repository.is_empty() {
+        "Not configured"
+    } else {
+        settings.repository.as_str()
+    };
+    let detail = app
+        .sync_status
+        .detail()
+        .unwrap_or("Local saves always continue, including while GitHub is unavailable.");
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Status      ", label_style),
+            Span::styled(app.sync_status.label(), status_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Repository  ", label_style),
+            Span::styled(
+                truncate_to_width(repository, inner.width.saturating_sub(12) as usize),
+                value_style,
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Branch      ", label_style),
+            Span::styled(app.sync_branch.as_deref().unwrap_or("—"), value_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            truncate_to_width(detail, inner.width as usize),
+            Style::default().fg(theme.dark_foreground).bg(theme.panel),
+        )),
+        Line::from(""),
+    ];
+
+    if settings.editing {
+        let editor = Editor {
+            kind: EditKind::Search,
+            input: settings.repository.clone(),
+            cursor: settings.cursor,
+        };
+        let (visible, _) = visible_input(&editor, inner.width.saturating_sub(1) as usize);
+        lines.extend([
+            Line::from(Span::styled(
+                "GitHub HTTPS or SSH URL:",
+                Style::default().fg(theme.accent).bg(theme.panel),
+            )),
+            Line::from(Span::styled(
+                pad_to_width(&visible, inner.width as usize),
+                Style::default()
+                    .fg(theme.bright_foreground)
+                    .bg(theme.selection),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Enter connects · credentials come from Git or SSH",
+                label_style,
+            )),
+        ]);
+    } else if settings.confirm_disconnect {
+        lines.extend([
+            Line::from(Span::styled(
+                "Disconnect and archive the local sync clone?",
+                Style::default().fg(theme.red).bg(theme.panel),
+            )),
+            Line::from(""),
+            Line::from("Enter / y confirm    Esc / n cancel"),
+        ]);
+    } else if matches!(app.sync_status, SyncStatus::Conflict(_)) {
+        lines.extend([
+            Line::from(Span::styled(
+                "Both snapshots will be backed up before resolution.",
+                label_style,
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("l", Style::default().fg(theme.accent)),
+                Span::raw(" keep Local    "),
+                Span::styled("h", Style::default().fg(theme.accent)),
+                Span::raw(" use GitHub"),
+            ]),
+        ]);
+    } else {
+        lines.extend([
+            Line::from("e edit/connect repository URL"),
+            Line::from("r synchronize now"),
+            Line::from("x disconnect and archive clone"),
+            Line::from(""),
+            Line::from(Span::styled(
+                "The repository must already exist and be dedicated to who-me.",
+                label_style,
+            )),
+        ]);
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(value_style)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+    if settings.editing {
+        let editor = Editor {
+            kind: EditKind::Search,
+            input: settings.repository.clone(),
+            cursor: settings.cursor,
+        };
+        let (_, cursor) = visible_input(&editor, inner.width.saturating_sub(1) as usize);
+        frame.set_cursor_position(Position::new(
+            inner.x.saturating_add(cursor as u16),
+            inner.y.saturating_add(7),
+        ));
     }
 }
 
@@ -765,7 +922,7 @@ fn render_confirmation(
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
-    let popup = centered_rect(area, 78, 24);
+    let popup = centered_rect(area, 78, 25);
     frame.render_widget(Clear, popup);
     let rows = [
         ("↑ / ↓", "Move through identity titles and entries"),
@@ -778,6 +935,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
         ("Ctrl + ↑ / ↓", "Reorder the selected entry"),
         ("Ctrl + ← / →", "Reorder the selected identity"),
         ("/", "Search identity names and entry text"),
+        ("g", "Open GitHub sync settings"),
         ("Esc", "Clear search or close the current view"),
         ("q", "Quit"),
     ];
@@ -1082,5 +1240,20 @@ mod tests {
         assert!(output.contains("Identity status"));
         assert!(output.contains("Aspiring"));
         assert!(output.contains("Former"));
+
+        app.mode = Mode::Settings(SettingsState {
+            repository: "https://github.com/person/private".into(),
+            cursor: 33,
+            editing: false,
+            confirm_disconnect: false,
+        });
+        app.sync_repository = Some("https://github.com/person/private".into());
+        app.sync_status = SyncStatus::Synced;
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("GitHub sync settings"));
+        assert!(output.contains("Synced"));
     }
 }

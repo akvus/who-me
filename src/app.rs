@@ -1,6 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::model::{Document, IdentityStatus, Item, Topic};
+use crate::{
+    model::{Document, IdentityStatus, Item, Topic},
+    sync::{ConflictChoice, SyncStatus, validate_github_url},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -9,7 +12,16 @@ pub enum Mode {
     Searching(Editor),
     SelectingStatus(StatusPicker),
     ConfirmDelete(DeleteTarget),
+    Settings(SettingsState),
     Help,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettingsState {
+    pub repository: String,
+    pub cursor: usize,
+    pub editing: bool,
+    pub confirm_disconnect: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,10 +52,19 @@ pub enum DeleteTarget {
     Item(usize, usize),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncAction {
+    Configure(String),
+    Synchronize,
+    Resolve(ConflictChoice),
+    Disconnect,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HandleResult {
     pub quit: bool,
     pub changed: bool,
+    pub sync_action: Option<SyncAction>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +76,9 @@ pub struct App {
     pub query: String,
     pub status: Option<String>,
     pub scroll: u16,
+    pub sync_status: SyncStatus,
+    pub sync_repository: Option<String>,
+    pub sync_branch: Option<String>,
 }
 
 impl App {
@@ -67,6 +91,9 @@ impl App {
             query: String::new(),
             status: None,
             scroll: 0,
+            sync_status: SyncStatus::LocalOnly,
+            sync_repository: None,
+            sync_branch: None,
         }
     }
 
@@ -140,6 +167,7 @@ impl App {
                     HandleResult::default()
                 }
             },
+            Mode::Settings(mut settings) => self.handle_settings(key, &mut settings),
             Mode::Help => {
                 if !matches!(
                     key.code,
@@ -193,6 +221,34 @@ impl App {
         self.status = Some(message.into());
     }
 
+    pub fn set_sync_status(&mut self, status: SyncStatus) {
+        self.sync_status = status;
+    }
+
+    pub fn set_sync_repository(&mut self, repository: Option<String>) {
+        self.sync_repository = repository;
+    }
+
+    pub fn set_sync_branch(&mut self, branch: Option<String>) {
+        self.sync_branch = branch;
+    }
+
+    pub fn apply_document(&mut self, document: Document) {
+        self.document = document;
+        self.selected_topic = self
+            .selected_topic
+            .min(self.document.topics.len().saturating_sub(1));
+        if self.document.topics.is_empty() {
+            self.selected_item = None;
+        } else if let Some(item) = self.selected_item
+            && item >= self.document.topics[self.selected_topic].items.len()
+        {
+            self.selected_item = None;
+        }
+        self.ensure_visible_selection();
+        self.status = Some("Updated from GitHub".into());
+    }
+
     fn handle_normal(&mut self, key: KeyEvent) -> HandleResult {
         self.mode = Mode::Normal;
         self.status = None;
@@ -218,6 +274,16 @@ impl App {
             },
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
+                HandleResult::default()
+            }
+            KeyCode::Char('g') => {
+                let repository = self.sync_repository.clone().unwrap_or_default();
+                self.mode = Mode::Settings(SettingsState {
+                    cursor: repository.chars().count(),
+                    repository,
+                    editing: false,
+                    confirm_disconnect: false,
+                });
                 HandleResult::default()
             }
             KeyCode::Char('/') => {
@@ -318,6 +384,77 @@ impl App {
                 HandleResult::default()
             }
             _ => HandleResult::default(),
+        }
+    }
+
+    fn handle_settings(&mut self, key: KeyEvent, settings: &mut SettingsState) -> HandleResult {
+        if settings.confirm_disconnect {
+            match key.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                    settings.confirm_disconnect = false;
+                    self.mode = Mode::Settings(settings.clone());
+                    return HandleResult {
+                        sync_action: Some(SyncAction::Disconnect),
+                        ..HandleResult::default()
+                    };
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    settings.confirm_disconnect = false;
+                }
+                _ => {}
+            }
+            self.mode = Mode::Settings(settings.clone());
+            return HandleResult::default();
+        }
+
+        if settings.editing {
+            match key.code {
+                KeyCode::Esc => settings.editing = false,
+                KeyCode::Enter => {
+                    let repository = settings.repository.trim().to_owned();
+                    if let Err(error) = validate_github_url(&repository) {
+                        self.status = Some(format!("Could not connect: {error}"));
+                    } else {
+                        settings.repository.clone_from(&repository);
+                        settings.cursor = settings.repository.chars().count();
+                        settings.editing = false;
+                        self.mode = Mode::Settings(settings.clone());
+                        return HandleResult {
+                            sync_action: Some(SyncAction::Configure(repository)),
+                            ..HandleResult::default()
+                        };
+                    }
+                }
+                _ => edit_value(&mut settings.repository, &mut settings.cursor, key),
+            }
+            self.mode = Mode::Settings(settings.clone());
+            return HandleResult::default();
+        }
+
+        let action = match key.code {
+            KeyCode::Esc | KeyCode::Char('g') => return HandleResult::default(),
+            KeyCode::Char('e') => {
+                settings.editing = true;
+                settings.cursor = settings.repository.chars().count();
+                None
+            }
+            KeyCode::Char('r') if self.sync_repository.is_some() => Some(SyncAction::Synchronize),
+            KeyCode::Char('x') if self.sync_repository.is_some() => {
+                settings.confirm_disconnect = true;
+                None
+            }
+            KeyCode::Char('l') if matches!(self.sync_status, SyncStatus::Conflict(_)) => {
+                Some(SyncAction::Resolve(ConflictChoice::KeepLocal))
+            }
+            KeyCode::Char('h') if matches!(self.sync_status, SyncStatus::Conflict(_)) => {
+                Some(SyncAction::Resolve(ConflictChoice::UseRemote))
+            }
+            _ => None,
+        };
+        self.mode = Mode::Settings(settings.clone());
+        HandleResult {
+            sync_action: action,
+            ..HandleResult::default()
         }
     }
 
@@ -581,30 +718,34 @@ fn adjacent_status(status: IdentityStatus, direction: isize) -> IdentityStatus {
 }
 
 fn edit_text(editor: &mut Editor, key: KeyEvent) {
+    edit_value(&mut editor.input, &mut editor.cursor, key);
+}
+
+fn edit_value(value: &mut String, cursor: &mut usize, key: KeyEvent) {
     match key.code {
         KeyCode::Char(character)
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
-            let byte = char_to_byte(&editor.input, editor.cursor);
-            editor.input.insert(byte, character);
-            editor.cursor += 1;
+            let byte = char_to_byte(value, *cursor);
+            value.insert(byte, character);
+            *cursor += 1;
         }
-        KeyCode::Backspace if editor.cursor > 0 => {
-            let start = char_to_byte(&editor.input, editor.cursor - 1);
-            let end = char_to_byte(&editor.input, editor.cursor);
-            editor.input.replace_range(start..end, "");
-            editor.cursor -= 1;
+        KeyCode::Backspace if *cursor > 0 => {
+            let start = char_to_byte(value, *cursor - 1);
+            let end = char_to_byte(value, *cursor);
+            value.replace_range(start..end, "");
+            *cursor -= 1;
         }
-        KeyCode::Delete if editor.cursor < editor.input.chars().count() => {
-            let start = char_to_byte(&editor.input, editor.cursor);
-            let end = char_to_byte(&editor.input, editor.cursor + 1);
-            editor.input.replace_range(start..end, "");
+        KeyCode::Delete if *cursor < value.chars().count() => {
+            let start = char_to_byte(value, *cursor);
+            let end = char_to_byte(value, *cursor + 1);
+            value.replace_range(start..end, "");
         }
-        KeyCode::Left => editor.cursor = editor.cursor.saturating_sub(1),
-        KeyCode::Right => editor.cursor = (editor.cursor + 1).min(editor.input.chars().count()),
-        KeyCode::Home => editor.cursor = 0,
-        KeyCode::End => editor.cursor = editor.input.chars().count(),
+        KeyCode::Left => *cursor = cursor.saturating_sub(1),
+        KeyCode::Right => *cursor = (*cursor + 1).min(value.chars().count()),
+        KeyCode::Home => *cursor = 0,
+        KeyCode::End => *cursor = value.chars().count(),
         _ => {}
     }
 }
@@ -784,5 +925,30 @@ mod tests {
         app.handle_key(key(KeyCode::Char('s')));
         assert!(!app.handle_key(key(KeyCode::Enter)).changed);
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn settings_configure_and_resolve_sync() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('g')));
+        app.handle_key(key(KeyCode::Char('e')));
+        for character in "https://github.com/person/private".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let result = app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            result.sync_action,
+            Some(SyncAction::Configure(
+                "https://github.com/person/private".into()
+            ))
+        );
+
+        app.set_sync_repository(Some("https://github.com/person/private".into()));
+        app.set_sync_status(SyncStatus::Conflict("both changed".into()));
+        let result = app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(
+            result.sync_action,
+            Some(SyncAction::Resolve(ConflictChoice::KeepLocal))
+        );
     }
 }

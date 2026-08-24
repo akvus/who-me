@@ -36,6 +36,7 @@ cargo run
 | `Ctrl` + `↑` / `↓` | Reorder an entry |
 | `Ctrl` + `←` / `→` | Reorder a topic |
 | `/` | Search topics and entries |
+| `g` | Open GitHub sync settings |
 | `Esc` | Cancel, close, or clear search |
 | `?` | Show the keyboard guide |
 | `q` | Quit |
@@ -69,6 +70,16 @@ done = false
 Identity statuses are `aspiring`, `active`, and `former`. Older files without a status remain valid and load as `active`.
 
 Writes use a temporary file and atomic rename. Before an existing file is replaced, its previous contents are copied to `data.toml.bak`. If the main file is malformed, `who-me` reports the exact problem and does not overwrite it.
+
+## Private GitHub Sync
+
+Press `g` to connect a dedicated private GitHub repository. The repository must already exist, the `git` executable must be installed, and access must work through your normal Git credentials: an SSH key, SSH agent, or system Git credential helper. `who-me` accepts GitHub HTTPS and SSH URLs, disables interactive Git credential prompts, and never stores a token.
+
+The local `data.toml` remains the working copy and is always saved first. A background worker synchronizes the repository's root `data.toml` after edits, at startup, and periodically while the app is open. If the network is unavailable, editing continues and pending changes retry automatically.
+
+When both local and GitHub data changed and Git cannot merge them, the header shows **Conflict**. Open settings with `g` and choose either `l` to keep the current local document or `h` to use GitHub. Both versions are backed up under `$XDG_DATA_HOME/who-me/conflicts/` before resolution.
+
+Disconnecting keeps the primary local file and archives the clone under `$XDG_DATA_HOME/who-me/sync-archives/`. Sync configuration is stored without credentials at `$XDG_CONFIG_HOME/who-me/config.toml` (or below `~/.config`).
 
 On Omarchy, colors are read at startup from `$XDG_STATE_HOME/omarchy/current/theme/colors.toml`, or the corresponding path below `~/.local/state`.
 

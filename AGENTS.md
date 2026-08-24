@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`who-me` is a Rust 2024 terminal UI application. `src/main.rs` owns CLI parsing, terminal setup, and the event loop. Keep domain data and validation in `src/model.rs`, persistence and atomic backups in `src/storage.rs`, keyboard-driven state transitions in `src/app.rs`, palette loading in `src/theme.rs`, and Ratatui rendering/layout in `src/ui.rs`. Unit tests live beside the code in each module under `#[cfg(test)]`; there is currently no separate `tests/` or asset directory. `README.md` documents user-facing controls and storage behavior. Cargo output belongs in ignored `target/`.
+`who-me` is a Rust 2024 terminal UI application. `src/main.rs` owns CLI parsing, terminal setup, and the event loop. Keep domain data in `src/model.rs`, local persistence in `src/storage.rs`, GitHub synchronization in `src/sync.rs`, keyboard state transitions in `src/app.rs`, palette loading in `src/theme.rs`, and Ratatui rendering in `src/ui.rs`. Unit tests live beside the code under `#[cfg(test)]`; there is no separate `tests/` or asset directory. `README.md` documents user-facing behavior. Cargo output belongs in ignored `target/`.
 
 ## Build, Test, and Development Commands
 
