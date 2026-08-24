@@ -2,7 +2,9 @@
 
 `who-me` is a keyboard-first terminal dashboard for keeping the different parts of who you are in view. Create identity topics such as **Developer**, **Mountaineer**, or **Writer**, then keep a simple checklist inside each one.
 
-The dashboard is deliberately small in scope: editable text, completion state, reordering, and search. It follows the active Omarchy color palette when one is available and falls back to a bundled true-color theme elsewhere.
+The dashboard is deliberately small in scope: editable text, completion state, reordering, and search. Each identity receives a stable symbol and accent derived from its name, while the selected card comes forward and the others stay calm. Cards adapt from one to four columns, and the whole identity map scrolls when it grows beyond the terminal.
+
+`who-me` follows the complete active Omarchy palette when one is available and falls back to a bundled true-color theme elsewhere. Symbols and colors are generated at runtime, so the data file remains simple text with no presentation settings.
 
 ## Install
 
@@ -73,4 +75,3 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
-

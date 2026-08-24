@@ -62,18 +62,6 @@ impl Document {
         }
         Ok(())
     }
-
-    pub fn item_count(&self) -> usize {
-        self.topics.iter().map(|topic| topic.items.len()).sum()
-    }
-
-    pub fn done_count(&self) -> usize {
-        self.topics
-            .iter()
-            .flat_map(|topic| &topic.items)
-            .filter(|item| item.done)
-            .count()
-    }
 }
 
 #[cfg(test)]

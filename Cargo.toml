@@ -6,10 +6,11 @@ description = "A beautiful terminal dashboard for the different parts of who you
 license = "MIT"
 
 [dependencies]
-crossterm = "0.28"
-ratatui = "0.29"
+crossterm = "0.29"
+ratatui = "0.30.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+tui-scrollview = "0.6.7"
 unicode-width = "0.2"
 
 [dev-dependencies]
@@ -18,4 +19,3 @@ tempfile = "3"
 [profile.release]
 lto = "thin"
 strip = true
-

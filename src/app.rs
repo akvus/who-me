@@ -47,7 +47,7 @@ pub struct App {
     pub mode: Mode,
     pub query: String,
     pub status: Option<String>,
-    pub scroll: usize,
+    pub scroll: u16,
 }
 
 impl App {

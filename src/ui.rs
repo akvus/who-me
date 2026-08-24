@@ -1,19 +1,21 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
-    style::{Modifier, Style},
+    layout::{Alignment, Constraint, Direction, Layout, Offset, Position, Rect, Size},
+    style::{Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Shadow, Wrap},
 };
+use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, DeleteTarget, EditKind, Editor, Mode},
-    theme::AppTheme,
+    theme::{AppTheme, TopicVisual},
 };
 
-const MIN_CARD_WIDTH: usize = 34;
-const CARD_GAP: usize = 2;
+const CARD_GAP_X: u16 = 2;
+const CARD_GAP_Y: u16 = 1;
+const CARD_MIN_HEIGHT: u16 = 7;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
     let area = frame.area();
@@ -27,7 +29,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(3),
-            Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(area);
 
@@ -46,9 +48,29 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
-    let total = app.document.item_count();
-    let done = app.document.done_count();
-    let mut spans = vec![
+    let block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_style(Style::default().fg(theme.muted))
+        .style(Style::default().bg(theme.background));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let count = format!(
+        "{} {}",
+        app.document.topics.len(),
+        if app.document.topics.len() == 1 {
+            "identity"
+        } else {
+            "identities"
+        }
+    );
+    let count_width = display_width(&count)
+        .saturating_add(2)
+        .min(inner.width as usize) as u16;
+    let [brand_area, count_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(count_width)]).areas(inner);
+
+    let mut brand = vec![
         Span::styled(
             " WHO / ME ",
             Style::default()
@@ -58,16 +80,12 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
         ),
         Span::raw("  "),
         Span::styled(
-            format!("{} identities", app.document.topics.len()),
-            Style::default().fg(theme.bright_foreground),
-        ),
-        Span::styled(
-            format!("  ·  {done}/{total} checked"),
-            Style::default().fg(theme.muted),
+            "a map of what makes you, you",
+            Style::default().fg(theme.dark_foreground),
         ),
     ];
     if !app.query.is_empty() {
-        spans.extend([
+        brand.extend([
             Span::raw("  "),
             Span::styled(
                 format!(" / {} ", app.query),
@@ -75,16 +93,18 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
             ),
         ]);
     }
-    let header = Paragraph::new(Line::from(spans))
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(theme.muted)),
-        )
-        .style(Style::default().bg(theme.background).fg(theme.foreground))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(header, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(brand))
+            .style(Style::default().bg(theme.background))
+            .wrap(Wrap { trim: true }),
+        brand_area,
+    );
+    frame.render_widget(
+        Paragraph::new(count)
+            .style(Style::default().fg(theme.muted).bg(theme.background))
+            .alignment(Alignment::Right),
+        count_area,
+    );
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
@@ -93,234 +113,484 @@ fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &Ap
     }
     let visible_topics = app.visible_topics();
     if visible_topics.is_empty() {
-        let message = if app.document.topics.is_empty() {
-            "No identities yet\n\nPress t to add the first part of who you are"
-        } else {
-            "Nothing matches this search\n\nPress Esc to clear it"
-        };
-        let empty = Paragraph::new(message)
-            .style(Style::default().fg(theme.muted).bg(theme.background))
-            .alignment(Alignment::Center)
-            .block(Block::default().padding(Padding::top(area.height.saturating_sub(4) / 2)));
-        frame.render_widget(empty, area);
+        render_empty_state(frame, area, app, theme);
         app.scroll = 0;
         return;
     }
 
-    let available = area.width as usize;
-    let columns = ((available + CARD_GAP) / (MIN_CARD_WIDTH + CARD_GAP))
-        .max(1)
-        .min(visible_topics.len());
-    let card_width = (available - CARD_GAP * (columns - 1)) / columns;
-    let used_width = card_width * columns + CARD_GAP * (columns - 1);
-    let trailing = available.saturating_sub(used_width);
+    let viewport = Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width.saturating_sub(2),
+        area.height,
+    );
+    let canvas_width = viewport.width.saturating_sub(1).max(1);
+    let layout = dashboard_layout(app, canvas_width);
+    let mut scroll_view = ScrollView::new(Size::new(canvas_width, layout.height.max(1)))
+        .vertical_scrollbar_visibility(ScrollbarVisibility::Automatic)
+        .horizontal_scrollbar_visibility(ScrollbarVisibility::Never);
 
-    let mut dashboard = Vec::<Line<'static>>::new();
-    let mut selected_line = 0usize;
-    for (row_number, row) in visible_topics.chunks(columns).enumerate() {
-        if row_number > 0 {
-            dashboard.push(Line::from(""));
-        }
-        let row_start = dashboard.len();
-        let cards: Vec<Card> = row
-            .iter()
-            .map(|&topic| build_card(app, topic, card_width, theme))
-            .collect();
-        let row_height = cards.iter().map(|card| card.lines.len()).max().unwrap_or(0);
-
-        for line_index in 0..row_height {
-            let mut spans = Vec::new();
-            for (column, card) in cards.iter().enumerate() {
-                if column > 0 {
-                    spans.push(Span::raw(" ".repeat(CARD_GAP)));
-                }
-                if let Some(line) = card.lines.get(line_index) {
-                    spans.extend(line.spans.clone());
-                } else {
-                    spans.push(Span::raw(" ".repeat(card_width)));
-                }
-            }
-            if trailing > 0 {
-                spans.push(Span::raw(" ".repeat(trailing)));
-            }
-            dashboard.push(Line::from(spans));
-        }
-
-        if let Some((_, card)) = row
-            .iter()
-            .zip(cards.iter())
-            .find(|(topic, _)| **topic == app.selected_topic)
-        {
-            selected_line = row_start + card.selected_line;
-        }
+    for placement in &layout.cards {
+        render_card(&mut scroll_view, app, placement, theme);
     }
 
-    let viewport_height = area.height as usize;
-    if selected_line < app.scroll {
-        app.scroll = selected_line;
-    } else if selected_line >= app.scroll + viewport_height {
-        app.scroll = selected_line + 1 - viewport_height;
+    let viewport_height = area.height;
+    if layout.selected_y < app.scroll {
+        app.scroll = layout.selected_y;
+    } else if layout.selected_y >= app.scroll.saturating_add(viewport_height) {
+        app.scroll = layout
+            .selected_y
+            .saturating_add(1)
+            .saturating_sub(viewport_height);
     }
-    let maximum_scroll = dashboard.len().saturating_sub(viewport_height);
-    app.scroll = app.scroll.min(maximum_scroll);
+    app.scroll = app
+        .scroll
+        .min(layout.height.saturating_sub(viewport_height));
 
-    frame.render_widget(
-        Paragraph::new(dashboard)
-            .style(Style::default().bg(theme.background).fg(theme.foreground))
-            .scroll((app.scroll.min(u16::MAX as usize) as u16, 0)),
-        area,
+    let mut state = ScrollViewState::with_offset(Position::new(0, app.scroll));
+    frame.render_stateful_widget(scroll_view, viewport, &mut state);
+    app.scroll = state.offset().y;
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CardPlacement {
+    topic: usize,
+    area: Rect,
+}
+
+#[derive(Clone, Copy)]
+struct CardAppearance<'a> {
+    focused: bool,
+    visual: TopicVisual,
+    theme: &'a AppTheme,
+    background: ratatui::style::Color,
+}
+
+#[derive(Debug)]
+struct DashboardLayout {
+    cards: Vec<CardPlacement>,
+    height: u16,
+    selected_y: u16,
+}
+
+fn dashboard_layout(app: &App, width: u16) -> DashboardLayout {
+    let topics = app.visible_topics();
+    let columns = dashboard_columns(width).min(topics.len()).max(1);
+    let gaps = CARD_GAP_X.saturating_mul(columns.saturating_sub(1) as u16);
+    let usable_width = width.saturating_sub(1).saturating_sub(gaps);
+    let card_width = (usable_width / columns as u16).max(6);
+    let used_width = card_width
+        .saturating_mul(columns as u16)
+        .saturating_add(gaps);
+    let remainder = width.saturating_sub(1).saturating_sub(used_width);
+
+    let mut cards = Vec::with_capacity(topics.len());
+    let mut y = 0u16;
+    let mut selected_y = 0u16;
+    for row in topics.chunks(columns) {
+        let row_height = row
+            .iter()
+            .map(|&topic| card_height(app, topic, card_width))
+            .max()
+            .unwrap_or(CARD_MIN_HEIGHT);
+        for (column, &topic) in row.iter().enumerate() {
+            let bonus = u16::from(column + 1 == columns).min(remainder);
+            let x = (card_width + CARD_GAP_X).saturating_mul(column as u16);
+            let area = Rect::new(x, y, card_width.saturating_add(bonus), row_height);
+            if topic == app.selected_topic {
+                selected_y = y.saturating_add(card_selected_line(app, topic, area.width));
+            }
+            cards.push(CardPlacement { topic, area });
+        }
+        y = y.saturating_add(row_height).saturating_add(CARD_GAP_Y);
+    }
+
+    DashboardLayout {
+        cards,
+        height: y.max(1),
+        selected_y,
+    }
+}
+
+fn dashboard_columns(width: u16) -> usize {
+    match width {
+        168.. => 4,
+        120..=167 => 3,
+        72..=119 => 2,
+        _ => 1,
+    }
+}
+
+fn card_height(app: &App, topic: usize, width: u16) -> u16 {
+    let text_width = width.saturating_sub(8).max(1) as usize;
+    let visible_items = app.visible_items(topic);
+    let list_height = if visible_items.is_empty() {
+        1
+    } else {
+        visible_items
+            .iter()
+            .map(|&item| wrap_text(&app.document.topics[topic].items[item].text, text_width).len())
+            .sum()
+    };
+    (list_height as u16).saturating_add(4).max(CARD_MIN_HEIGHT)
+}
+
+fn card_selected_line(app: &App, topic: usize, width: u16) -> u16 {
+    let Some(selected) = app.selected_item else {
+        return 0;
+    };
+    let text_width = width.saturating_sub(8).max(1) as usize;
+    let before: usize = app
+        .visible_items(topic)
+        .into_iter()
+        .take_while(|&item| item != selected)
+        .map(|item| wrap_text(&app.document.topics[topic].items[item].text, text_width).len())
+        .sum();
+    3u16.saturating_add(before as u16)
+}
+
+fn render_card(
+    scroll_view: &mut ScrollView,
+    app: &App,
+    placement: &CardPlacement,
+    theme: &AppTheme,
+) {
+    let topic = &app.document.topics[placement.topic];
+    let focused = placement.topic == app.selected_topic;
+    let visual = theme.topic_visual(&topic.name);
+    let background = if focused {
+        theme.panel
+    } else {
+        theme.dark_background
+    };
+    let border_color = if focused { visual.color } else { theme.muted };
+    let title_name = truncate_to_width(
+        &topic.name,
+        placement.area.width.saturating_sub(15) as usize,
+    );
+    let title_style = Style::default()
+        .fg(if focused {
+            theme.bright_foreground
+        } else {
+            theme.dark_foreground
+        })
+        .bg(background)
+        .add_modifier(if focused {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        });
+    let symbol_style = Style::default()
+        .fg(visual.color)
+        .bg(background)
+        .add_modifier(if focused {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        });
+    let total = topic.items.len();
+    let done = topic.items.iter().filter(|item| item.done).count();
+    let appearance = CardAppearance {
+        focused,
+        visual,
+        theme,
+        background,
+    };
+
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color).bg(background))
+        .style(Style::default().bg(background))
+        .padding(Padding::horizontal(1))
+        .title_top(
+            Line::from(vec![
+                Span::styled(format!(" {} ", visual.symbol), symbol_style),
+                Span::styled(format!("{title_name} "), title_style),
+            ])
+            .left_aligned(),
+        )
+        .title_top(
+            Line::from(Span::styled(
+                format!(" {done}/{total} "),
+                Style::default()
+                    .fg(if focused {
+                        theme.muted
+                    } else {
+                        theme.dark_foreground
+                    })
+                    .bg(background),
+            ))
+            .right_aligned(),
+        );
+
+    if focused && placement.area.width >= 34 {
+        let hint = if app.selected_item.is_some() {
+            " Space check · ↵ edit "
+        } else {
+            " a add · ↵ rename "
+        };
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                hint,
+                Style::default().fg(theme.muted).bg(background),
+            ))
+            .right_aligned(),
+        );
+    }
+    if focused {
+        block = block.shadow(
+            Shadow::medium_shade()
+                .fg(theme.darker_background)
+                .offset(Offset::new(1, 1)),
+        );
+    }
+
+    let inner = block.inner(placement.area);
+    scroll_view.render_widget(block, placement.area);
+    if inner.is_empty() {
+        return;
+    }
+
+    render_progress(scroll_view, inner, done, total, appearance);
+    let list_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    let lines = card_item_lines(app, placement.topic, inner.width, appearance);
+    scroll_view.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(background)),
+        list_area,
     );
 }
 
-struct Card {
-    lines: Vec<Line<'static>>,
-    selected_line: usize,
+fn render_progress(
+    scroll_view: &mut ScrollView,
+    inner: Rect,
+    done: usize,
+    total: usize,
+    appearance: CardAppearance<'_>,
+) {
+    let CardAppearance {
+        focused,
+        visual,
+        theme,
+        background,
+    } = appearance;
+    if total == 0 {
+        scroll_view.render_widget(
+            Paragraph::new(Span::styled(
+                "0 entries",
+                Style::default().fg(theme.dark_foreground).bg(background),
+            )),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+        return;
+    }
+    let width = inner.width as usize;
+    let filled = (done * width + total / 2) / total;
+    let filled_style = Style::default()
+        .fg(if focused { visual.color } else { theme.muted })
+        .bg(background);
+    let empty_style = Style::default()
+        .fg(theme.muted)
+        .bg(background)
+        .add_modifier(Modifier::DIM);
+    scroll_view.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("━".repeat(filled), filled_style),
+            Span::styled("─".repeat(width.saturating_sub(filled)), empty_style),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
 }
 
-fn build_card(app: &App, topic_index: usize, width: usize, theme: &AppTheme) -> Card {
+fn card_item_lines(
+    app: &App,
+    topic_index: usize,
+    width: u16,
+    appearance: CardAppearance<'_>,
+) -> Vec<Line<'static>> {
+    let CardAppearance {
+        focused,
+        visual,
+        theme,
+        background,
+    } = appearance;
     let topic = &app.document.topics[topic_index];
-    let selected = topic_index == app.selected_topic;
-    let border_color = if selected { theme.accent } else { theme.muted };
-    let border_style = Style::default().fg(border_color).bg(theme.panel);
-    let panel_style = Style::default().fg(theme.foreground).bg(theme.panel);
-    let inner_width = width.saturating_sub(2);
-    let title_capacity = inner_width.saturating_sub(3);
-    let title = truncate_to_width(&topic.name, title_capacity);
-    let title_width = UnicodeWidthStr::width(title.as_str());
-    let dash_count = inner_width.saturating_sub(title_width + 2);
-    let top = format!("╭─ {title}{}╮", "─".repeat(dash_count));
-    let mut lines = vec![Line::from(Span::styled(top, border_style))];
-    let mut selected_line = 0;
     let visible_items = app.visible_items(topic_index);
-
     if visible_items.is_empty() {
         let text = if topic.items.is_empty() {
-            "No entries · press a to add one"
+            "Press a to add the first entry"
         } else {
             "No matching entries"
         };
-        lines.push(content_line(
-            vec![Span::styled(
-                pad_to_width(
-                    &truncate_to_width(text, inner_width.saturating_sub(2)),
-                    inner_width.saturating_sub(2),
-                ),
-                Style::default().fg(theme.muted).bg(theme.panel),
-            )],
-            inner_width,
-            border_style,
-            panel_style,
-        ));
-    } else {
-        let text_width = inner_width.saturating_sub(4).max(1);
-        for item_index in visible_items {
-            let item = &topic.items[item_index];
-            let wrapped = wrap_text(&item.text, text_width);
-            let is_selected = selected && app.selected_item == Some(item_index);
-            if is_selected {
-                selected_line = lines.len();
+        return vec![Line::from(Span::styled(
+            truncate_to_width(text, width as usize),
+            Style::default().fg(theme.dark_foreground).bg(background),
+        ))];
+    }
+
+    let text_width = width.saturating_sub(4).max(1) as usize;
+    let mut lines = Vec::new();
+    for item_index in visible_items {
+        let item = &topic.items[item_index];
+        let selected = focused && app.selected_item == Some(item_index);
+        let line_background = if selected {
+            theme.selection
+        } else {
+            background
+        };
+        for (part_index, part) in wrap_text(&item.text, text_width).iter().enumerate() {
+            let cursor = if selected && part_index == 0 {
+                "› "
+            } else {
+                "  "
+            };
+            let marker = if part_index == 0 {
+                if item.done { "✓ " } else { "○ " }
+            } else {
+                "  "
+            };
+            let cursor_style = Style::default()
+                .fg(if selected { visual.color } else { theme.muted })
+                .bg(line_background)
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            let marker_style = Style::default()
+                .fg(if item.done {
+                    theme.green
+                } else if focused {
+                    theme.muted
+                } else {
+                    theme.dark_foreground
+                })
+                .bg(line_background);
+            let mut text_style = Style::default()
+                .fg(if selected {
+                    theme.bright_foreground
+                } else if focused && !item.done {
+                    theme.foreground
+                } else {
+                    theme.dark_foreground
+                })
+                .bg(line_background);
+            if item.done {
+                text_style = text_style.add_modifier(Modifier::CROSSED_OUT);
             }
-            for (part_index, part) in wrapped.iter().enumerate() {
-                let background = if is_selected {
-                    theme.selection
-                } else {
-                    theme.panel
-                };
-                let base = Style::default()
-                    .fg(if item.done {
-                        theme.muted
-                    } else {
-                        theme.foreground
-                    })
-                    .bg(background);
-                let text_style = if item.done {
-                    base.add_modifier(Modifier::CROSSED_OUT)
-                } else if is_selected {
-                    base.fg(theme.bright_foreground)
-                } else {
-                    base
-                };
-                let marker = if part_index == 0 {
-                    if item.done { "✓ " } else { "○ " }
-                } else {
-                    "  "
-                };
-                let marker_style = Style::default()
-                    .fg(if item.done { theme.green } else { theme.muted })
-                    .bg(background);
-                let side_style = Style::default().fg(border_color).bg(background);
-                lines.push(Line::from(vec![
-                    Span::styled("│", side_style),
-                    Span::styled(" ", Style::default().bg(background)),
-                    Span::styled(marker, marker_style),
-                    Span::styled(pad_to_width(part, text_width), text_style),
-                    Span::styled(" ", Style::default().bg(background)),
-                    Span::styled("│", side_style),
-                ]));
-            }
+            lines.push(Line::from(vec![
+                Span::styled(cursor, cursor_style),
+                Span::styled(marker, marker_style),
+                Span::styled(pad_to_width(part, text_width), text_style),
+            ]));
         }
     }
-
-    lines.push(Line::from(Span::styled(
-        format!("╰{}╯", "─".repeat(inner_width)),
-        border_style,
-    )));
-    Card {
-        lines,
-        selected_line,
-    }
+    lines
 }
 
-fn content_line(
-    content: Vec<Span<'static>>,
-    inner_width: usize,
-    border_style: Style,
-    panel_style: Style,
-) -> Line<'static> {
-    let content_width: usize = content
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum();
-    let remaining = inner_width.saturating_sub(content_width + 2);
-    let mut spans = vec![
-        Span::styled("│", border_style),
-        Span::styled(" ", panel_style),
-    ];
-    spans.extend(content);
-    spans.push(Span::styled(" ".repeat(remaining + 1), panel_style));
-    spans.push(Span::styled("│", border_style));
-    Line::from(spans)
+fn render_empty_state(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
+    let searching = !app.query.is_empty();
+    let content = if searching {
+        vec![
+            Line::from(Span::styled("◇", Style::default().fg(theme.accent))),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Nothing matches this search",
+                Style::default()
+                    .fg(theme.bright_foreground)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Press Esc to see every identity again",
+                Style::default().fg(theme.muted),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled("◆", Style::default().fg(theme.accent)),
+                Span::raw("   "),
+                Span::styled("▲", Style::default().fg(theme.cyan)),
+                Span::raw("   "),
+                Span::styled("●", Style::default().fg(theme.magenta)),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Your identities live here",
+                Style::default()
+                    .fg(theme.bright_foreground)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Press t to name the first part of who you are",
+                Style::default().fg(theme.muted),
+            )),
+        ]
+    };
+    frame.render_widget(
+        Paragraph::new(content)
+            .style(Style::default().bg(theme.background))
+            .alignment(Alignment::Center)
+            .block(Block::default().padding(Padding::top(area.height.saturating_sub(5) / 2))),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
-    let hints = match app.mode {
-        Mode::Normal => {
-            "↑↓ entries  ←→ topics  t topic  a entry  Enter edit  Space check  / search  ? help  q quit"
-        }
-        Mode::Editing(_) => "Enter save  Esc cancel  ←→ move cursor",
-        Mode::Searching(_) => "Type to filter  Enter keep  Esc clear",
-        Mode::ConfirmDelete(_) => "y / Enter confirm  n / Esc cancel",
-        Mode::Help => "Esc / ? close",
-    };
     let status = app.status.as_deref().unwrap_or("");
-    let line = Line::from(vec![
-        Span::styled(hints, Style::default().fg(theme.muted)),
-        Span::raw(if status.is_empty() { "" } else { "  ·  " }),
-        Span::styled(
-            status,
-            Style::default().fg(if status.starts_with("Could not") {
-                theme.red
-            } else {
-                theme.green
-            }),
-        ),
-    ]);
+    let status_width = display_width(status).min(area.width.saturating_sub(1) as usize) as u16;
+    let [hint_area, status_area] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(if status.is_empty() {
+            0
+        } else {
+            status_width.saturating_add(1)
+        }),
+    ])
+    .areas(area);
+    let hints = footer_hints(&app.mode, hint_area.width);
     frame.render_widget(
-        Paragraph::new(line)
-            .style(Style::default().bg(theme.background))
-            .wrap(Wrap { trim: true }),
-        area,
+        Paragraph::new(hints).style(Style::default().fg(theme.muted).bg(theme.background)),
+        hint_area,
     );
+    if !status.is_empty() {
+        frame.render_widget(
+            Paragraph::new(truncate_to_width(status, status_area.width as usize))
+                .style(
+                    Style::default()
+                        .fg(if status.starts_with("Could not") {
+                            theme.red
+                        } else {
+                            theme.green
+                        })
+                        .bg(theme.background),
+                )
+                .alignment(Alignment::Right),
+            status_area,
+        );
+    }
+}
+
+fn footer_hints(mode: &Mode, width: u16) -> &'static str {
+    match mode {
+        Mode::Normal if width >= 105 => {
+            "↑↓ entries  ←→ identities  t new  a add  ↵ edit  Space check  / search  ? help  q quit"
+        }
+        Mode::Normal if width >= 72 => {
+            "↑↓ navigate  t new  a add  ↵ edit  / search  ? help  q quit"
+        }
+        Mode::Normal if width >= 48 => "↑↓←→ navigate  t new  a add  / search  ? help",
+        Mode::Normal => "t new  / search  ? help  q quit",
+        Mode::Editing(_) => "↵ save  Esc cancel  ←→ cursor",
+        Mode::Searching(_) => "type to filter  ↵ keep  Esc clear",
+        Mode::ConfirmDelete(_) => "↵ / y confirm  Esc / n cancel",
+        Mode::Help => "Esc / ? close",
+    }
 }
 
 fn render_editor(
@@ -330,26 +600,21 @@ fn render_editor(
     status: Option<&str>,
     theme: &AppTheme,
 ) {
-    let popup = centered_rect(area, 72, 7);
+    let is_search = matches!(editor.kind, EditKind::Search);
+    let popup = if is_search {
+        top_centered_rect(area, 72, 5)
+    } else {
+        centered_rect(area, 72, 7)
+    };
     frame.render_widget(Clear, popup);
     let title = match editor.kind {
         EditKind::NewTopic => " New identity ",
         EditKind::RenameTopic(_) => " Rename identity ",
         EditKind::AddItem(_) => " New entry ",
         EditKind::EditItem(_, _) => " Edit entry ",
-        EditKind::Search => " Search everything ",
+        EditKind::Search => " / Search everything ",
     };
-    let block = Block::default()
-        .title(title)
-        .title_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
-        .padding(Padding::new(1, 1, 1, 0))
-        .style(Style::default().bg(theme.panel).fg(theme.foreground));
+    let block = overlay_block(title, theme.accent, theme);
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let input_width = inner.width.saturating_sub(1) as usize;
@@ -362,7 +627,7 @@ fn render_editor(
         ),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    if let Some(message) = status {
+    if !is_search && let Some(message) = status {
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(theme.red).bg(theme.panel)),
             Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
@@ -398,32 +663,29 @@ fn render_confirmation(
             .map(|item| format!("Delete entry {:?}?", item.text))
             .unwrap_or_else(|| "Delete this entry?".into()),
     };
-    let paragraph = Paragraph::new(vec![
-        Line::from(description),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " Enter / y ",
-                Style::default().fg(theme.background).bg(theme.red),
-            ),
-            Span::raw(" confirm    "),
-            Span::styled(
-                " Esc / n ",
-                Style::default().fg(theme.background).bg(theme.muted),
-            ),
-            Span::raw(" cancel"),
-        ]),
-    ])
-    .wrap(Wrap { trim: true })
-    .block(
-        Block::default()
-            .title(" Confirm deletion ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.red))
-            .padding(Padding::horizontal(1)),
-    )
-    .style(Style::default().fg(theme.foreground).bg(theme.panel));
-    frame.render_widget(paragraph, popup);
+    let block = overlay_block(" Confirm deletion ", theme.red, theme);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(description),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    " Enter / y ",
+                    Style::default().fg(theme.background).bg(theme.red),
+                ),
+                Span::raw(" confirm    "),
+                Span::styled(
+                    " Esc / n ",
+                    Style::default().fg(theme.background).bg(theme.muted),
+                ),
+                Span::raw(" cancel"),
+            ]),
+        ])
+        .wrap(Wrap { trim: true })
+        .block(block)
+        .style(Style::default().fg(theme.foreground).bg(theme.panel)),
+        popup,
+    );
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
@@ -452,27 +714,32 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
     lines.extend([
         Line::from(""),
         Line::from(Span::styled(
-            "Changes are saved immediately. Press Esc or ? to close.",
+            "Changes save immediately · Esc or ? closes this guide",
             Style::default().fg(theme.muted),
         )),
     ]);
     frame.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(" Keyboard guide ")
-                    .title_style(
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme.accent))
-                    .padding(Padding::horizontal(2)),
-            )
+            .block(overlay_block(" Keyboard guide ", theme.accent, theme))
             .style(Style::default().bg(theme.panel)),
         popup,
     );
+}
+
+fn overlay_block<'a>(title: &'a str, accent: ratatui::style::Color, theme: &AppTheme) -> Block<'a> {
+    Block::default()
+        .title(title)
+        .title_style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(accent))
+        .padding(Padding::new(1, 1, 1, 0))
+        .style(Style::default().bg(theme.panel).fg(theme.foreground))
+        .shadow(
+            Shadow::medium_shade()
+                .fg(theme.darker_background)
+                .offset(Offset::new(1, 1)),
+        )
 }
 
 fn centered_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rect {
@@ -486,12 +753,21 @@ fn centered_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rec
     )
 }
 
+fn top_centered_rect(area: Rect, preferred_width: u16, preferred_height: u16) -> Rect {
+    let mut popup = centered_rect(area, preferred_width, preferred_height);
+    popup.y = area
+        .y
+        .saturating_add(3)
+        .min(area.bottom().saturating_sub(popup.height));
+    popup
+}
+
 fn visible_input(editor: &Editor, width: usize) -> (String, usize) {
     if width == 0 {
         return (String::new(), 0);
     }
     let before: String = editor.input.chars().take(editor.cursor).collect();
-    let cursor_width = UnicodeWidthStr::width(before.as_str());
+    let cursor_width = display_width(&before);
     let skip_width = cursor_width.saturating_sub(width.saturating_sub(1));
     let mut skipped = 0;
     let mut start = 0;
@@ -515,9 +791,7 @@ fn wrap_text(value: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
     for word in value.split_whitespace() {
         let separator = usize::from(!current.is_empty());
-        if UnicodeWidthStr::width(current.as_str()) + separator + UnicodeWidthStr::width(word)
-            <= width
-        {
+        if display_width(&current) + separator + display_width(word) <= width {
             if separator == 1 {
                 current.push(' ');
             }
@@ -528,7 +802,7 @@ fn wrap_text(value: &str, width: usize) -> Vec<String> {
             lines.push(std::mem::take(&mut current));
         }
         let mut rest = word;
-        while UnicodeWidthStr::width(rest) > width {
+        while display_width(rest) > width {
             let byte = byte_at_width(rest, width);
             if byte == 0 {
                 let next = rest
@@ -555,7 +829,7 @@ fn wrap_text(value: &str, width: usize) -> Vec<String> {
 }
 
 fn truncate_to_width(value: &str, width: usize) -> String {
-    if UnicodeWidthStr::width(value) <= width {
+    if display_width(value) <= width {
         return value.to_owned();
     }
     if width == 0 {
@@ -581,8 +855,14 @@ fn byte_at_width(value: &str, width: usize) -> usize {
 }
 
 fn pad_to_width(value: &str, width: usize) -> String {
-    let used = UnicodeWidthStr::width(value);
-    format!("{value}{}", " ".repeat(width.saturating_sub(used)))
+    format!(
+        "{value}{}",
+        " ".repeat(width.saturating_sub(display_width(value)))
+    )
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
 }
 
 #[cfg(test)]
@@ -615,52 +895,98 @@ mod tests {
                         done: false,
                     }],
                 },
+                Topic {
+                    name: "Writer".into(),
+                    items: vec![Item {
+                        text: "Notice the precise word".into(),
+                        done: false,
+                    }],
+                },
+                Topic {
+                    name: "Friend".into(),
+                    items: Vec::new(),
+                },
             ],
         })
     }
 
+    fn rendered(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
     #[test]
     fn wraps_wide_and_long_text_without_exceeding_width() {
-        for line in wrap_text("hello extraordinary界界 world", 8) {
-            assert!(UnicodeWidthStr::width(line.as_str()) <= 8, "{line:?}");
+        for width in 1..=8 {
+            for line in wrap_text("hello extraordinary界界 e\u{301} world", width) {
+                assert!(display_width(&line) <= width, "width {width}: {line:?}");
+            }
         }
     }
 
     #[test]
-    fn renders_standard_and_narrow_terminals() {
-        for (width, height) in [(100, 30), (38, 16)] {
+    fn uses_the_documented_adaptive_column_thresholds() {
+        assert_eq!(dashboard_columns(60), 1);
+        assert_eq!(dashboard_columns(72), 2);
+        assert_eq!(dashboard_columns(119), 2);
+        assert_eq!(dashboard_columns(120), 3);
+        assert_eq!(dashboard_columns(168), 4);
+    }
+
+    #[test]
+    fn renders_all_supported_layout_sizes() {
+        for (width, height) in [(60, 18), (80, 24), (120, 32), (180, 45)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();
             let mut app = sample_app();
             terminal
                 .draw(|frame| render(frame, &mut app, &AppTheme::default()))
                 .unwrap();
-            let buffer = terminal.backend().buffer();
-            let rendered = buffer
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>();
-            assert!(rendered.contains("WHO / ME"));
-            assert!(rendered.contains("Developer"));
+            let output = rendered(&terminal);
+            assert!(output.contains("WHO / ME"));
+            assert!(output.contains("Developer"));
+            assert!(output.contains("Mountaineer"));
         }
     }
 
     #[test]
-    fn renders_empty_and_search_empty_states() {
-        let backend = TestBackend::new(60, 15);
+    fn auto_scrolls_to_the_selected_card() {
+        let backend = TestBackend::new(60, 9);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = sample_app();
+        app.selected_topic = app.document.topics.len() - 1;
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        assert!(app.scroll > 0);
+    }
+
+    #[test]
+    fn renders_empty_search_and_overlay_states() {
+        let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new(Document::default());
         terminal
             .draw(|frame| render(frame, &mut app, &AppTheme::default()))
             .unwrap();
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(rendered.contains("No identities yet"));
+        assert!(rendered(&terminal).contains("Your identities live here"));
+
+        app = sample_app();
+        app.query = "not present".into();
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        assert!(rendered(&terminal).contains("Nothing matches this search"));
+
+        app.mode = Mode::Help;
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        assert!(rendered(&terminal).contains("Keyboard guide"));
     }
 }
