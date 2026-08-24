@@ -774,7 +774,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
         ("s", "Choose Aspiring, Active, or Former status"),
         ("Enter", "Edit the selected title or entry"),
         ("Space", "Check or uncheck the selected entry"),
-        ("Delete", "Delete with confirmation"),
+        ("d", "Delete with confirmation"),
         ("Ctrl + ↑ / ↓", "Reorder the selected entry"),
         ("Ctrl + ← / →", "Reorder the selected identity"),
         ("/", "Search identity names and entry text"),

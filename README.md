@@ -32,7 +32,7 @@ cargo run
 | `s` | Choose the selected identity's status |
 | `Enter` | Edit the selected topic or entry |
 | `Space` | Check or uncheck an entry |
-| `Delete` or `Backspace` | Delete with confirmation |
+| `d` | Delete with confirmation |
 | `Ctrl` + `↑` / `↓` | Reorder an entry |
 | `Ctrl` + `←` / `→` | Reorder a topic |
 | `/` | Search topics and entries |

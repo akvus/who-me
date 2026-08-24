@@ -286,7 +286,7 @@ impl App {
                     ..HandleResult::default()
                 }
             }
-            KeyCode::Delete | KeyCode::Backspace => {
+            KeyCode::Char('d') => {
                 if self.selected_topic().is_some() {
                     let target = self
                         .selected_item
@@ -664,7 +664,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.document.topics.last().unwrap().items[0].text, "Essay");
 
-        app.handle_key(key(KeyCode::Delete));
+        app.handle_key(key(KeyCode::Char('d')));
         assert!(matches!(
             app.mode,
             Mode::ConfirmDelete(DeleteTarget::Item(_, _))
