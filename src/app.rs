@@ -1,14 +1,21 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::model::{Document, Item, Topic};
+use crate::model::{Document, IdentityStatus, Item, Topic};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Editing(Editor),
     Searching(Editor),
+    SelectingStatus(StatusPicker),
     ConfirmDelete(DeleteTarget),
     Help,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusPicker {
+    pub topic: usize,
+    pub selected: IdentityStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +108,24 @@ impl App {
                 }
                 HandleResult::default()
             }
+            Mode::SelectingStatus(mut picker) => match key.code {
+                KeyCode::Esc => HandleResult::default(),
+                KeyCode::Enter => self.commit_status(picker),
+                KeyCode::Up => {
+                    picker.selected = adjacent_status(picker.selected, -1);
+                    self.mode = Mode::SelectingStatus(picker);
+                    HandleResult::default()
+                }
+                KeyCode::Down => {
+                    picker.selected = adjacent_status(picker.selected, 1);
+                    self.mode = Mode::SelectingStatus(picker);
+                    HandleResult::default()
+                }
+                _ => {
+                    self.mode = Mode::SelectingStatus(picker);
+                    HandleResult::default()
+                }
+            },
             Mode::ConfirmDelete(target) => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.delete(target);
@@ -220,6 +245,15 @@ impl App {
                 });
                 HandleResult::default()
             }
+            KeyCode::Char('s') => {
+                if let Some(topic) = self.selected_topic() {
+                    self.mode = Mode::SelectingStatus(StatusPicker {
+                        topic: self.selected_topic,
+                        selected: topic.status,
+                    });
+                }
+                HandleResult::default()
+            }
             KeyCode::Enter => {
                 if let Some(item) = self.selected_item {
                     if let Some(value) = self
@@ -298,6 +332,7 @@ impl App {
             EditKind::NewTopic => {
                 self.document.topics.push(Topic {
                     name: value.into(),
+                    status: IdentityStatus::Active,
                     items: Vec::new(),
                 });
                 self.selected_topic = self.document.topics.len() - 1;
@@ -336,6 +371,21 @@ impl App {
         self.query.clear();
         self.status = Some("Saved".into());
         true
+    }
+
+    fn commit_status(&mut self, picker: StatusPicker) -> HandleResult {
+        let Some(topic) = self.document.topics.get_mut(picker.topic) else {
+            return HandleResult::default();
+        };
+        if topic.status == picker.selected {
+            return HandleResult::default();
+        }
+        topic.status = picker.selected;
+        self.status = Some(format!("Identity is now {}", picker.selected.label()));
+        HandleResult {
+            changed: true,
+            ..HandleResult::default()
+        }
     }
 
     fn toggle_selected(&mut self) -> bool {
@@ -487,6 +537,19 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
         .contains(&needle.trim().to_lowercase())
 }
 
+fn adjacent_status(status: IdentityStatus, direction: isize) -> IdentityStatus {
+    let position = IdentityStatus::ALL
+        .iter()
+        .position(|candidate| *candidate == status)
+        .unwrap_or(1);
+    let next = if direction < 0 {
+        position.saturating_sub(1)
+    } else {
+        (position + 1).min(IdentityStatus::ALL.len() - 1)
+    };
+    IdentityStatus::ALL[next]
+}
+
 fn edit_text(editor: &mut Editor, key: KeyEvent) {
     match key.code {
         KeyCode::Char(character)
@@ -544,6 +607,7 @@ mod tests {
             topics: vec![
                 Topic {
                     name: "Developer".into(),
+                    status: IdentityStatus::Active,
                     items: vec![
                         Item {
                             text: "Rust".into(),
@@ -557,6 +621,7 @@ mod tests {
                 },
                 Topic {
                     name: "Mountaineer".into(),
+                    status: IdentityStatus::Active,
                     items: vec![Item {
                         text: "Alps".into(),
                         done: false,
@@ -587,6 +652,10 @@ mod tests {
         }
         assert!(app.handle_key(key(KeyCode::Enter)).changed);
         assert_eq!(app.document.topics.last().unwrap().name, "Writer");
+        assert_eq!(
+            app.document.topics.last().unwrap().status,
+            IdentityStatus::Active
+        );
 
         app.handle_key(key(KeyCode::Char('a')));
         for character in "Essay".chars() {
@@ -638,5 +707,38 @@ mod tests {
         edit_text(&mut editor, key(KeyCode::Home));
         edit_text(&mut editor, key(KeyCode::Char('✓')));
         assert_eq!(editor.input, "✓é");
+    }
+
+    #[test]
+    fn selects_and_commits_identity_status() {
+        let mut app = app();
+        app.selected_item = Some(0);
+        assert!(!app.handle_key(key(KeyCode::Char('s'))).changed);
+        assert!(matches!(
+            app.mode,
+            Mode::SelectingStatus(StatusPicker {
+                selected: IdentityStatus::Active,
+                ..
+            })
+        ));
+
+        app.handle_key(key(KeyCode::Down));
+        let result = app.handle_key(key(KeyCode::Enter));
+        assert!(result.changed);
+        assert_eq!(app.document.topics[0].status, IdentityStatus::Former);
+        assert_eq!(app.status.as_deref(), Some("Identity is now Former"));
+    }
+
+    #[test]
+    fn status_picker_cancels_and_skips_unchanged_saves() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Up));
+        assert!(!app.handle_key(key(KeyCode::Esc)).changed);
+        assert_eq!(app.document.topics[0].status, IdentityStatus::Active);
+
+        app.handle_key(key(KeyCode::Char('s')));
+        assert!(!app.handle_key(key(KeyCode::Enter)).changed);
+        assert_eq!(app.mode, Mode::Normal);
     }
 }

@@ -185,7 +185,7 @@ fn nonempty_env(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DATA_VERSION, Item, Topic};
+    use crate::model::{DATA_VERSION, IdentityStatus, Item, Topic};
     use tempfile::tempdir;
 
     fn sample() -> Document {
@@ -193,6 +193,7 @@ mod tests {
             version: DATA_VERSION,
             topics: vec![Topic {
                 name: "Developer".into(),
+                status: IdentityStatus::Active,
                 items: vec![Item {
                     text: "Ship useful software".into(),
                     done: true,
@@ -238,5 +239,30 @@ mod tests {
             Err(StorageError::Parse { .. })
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), "not = [valid");
+    }
+
+    #[test]
+    fn legacy_data_defaults_to_active() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data.toml");
+        fs::write(&path, "version = 1\n\n[[topics]]\nname = \"Developer\"\n").unwrap();
+
+        let document = Store::new(path).load_or_create().unwrap();
+        assert_eq!(document.topics[0].status, IdentityStatus::Active);
+    }
+
+    #[test]
+    fn unknown_status_is_not_overwritten() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data.toml");
+        let source = "version = 1\n\n[[topics]]\nname = \"Developer\"\nstatus = \"paused\"\n";
+        fs::write(&path, source).unwrap();
+        let store = Store::new(path.clone());
+
+        assert!(matches!(
+            store.load_or_create(),
+            Err(StorageError::Parse { .. })
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
 }

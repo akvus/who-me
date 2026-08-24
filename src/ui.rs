@@ -9,7 +9,8 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, DeleteTarget, EditKind, Editor, Mode},
+    app::{App, DeleteTarget, EditKind, Editor, Mode, StatusPicker},
+    model::IdentityStatus,
     theme::{AppTheme, TopicVisual},
 };
 
@@ -41,6 +42,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         Mode::Editing(editor) | Mode::Searching(editor) => {
             render_editor(frame, area, editor, app.status.as_deref(), theme)
         }
+        Mode::SelectingStatus(picker) => render_status_picker(frame, area, *picker, theme),
         Mode::ConfirmDelete(target) => render_confirmation(frame, area, app, *target, theme),
         Mode::Help => render_help(frame, area, theme),
         Mode::Normal => {}
@@ -322,6 +324,20 @@ fn render_card(
                     .bg(background),
             ))
             .right_aligned(),
+        )
+        .title_bottom(
+            Line::from(Span::styled(
+                format!(" {} ", topic.status.label()),
+                Style::default()
+                    .fg(identity_status_color(topic.status, theme))
+                    .bg(background)
+                    .add_modifier(if focused {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::DIM
+                    }),
+            ))
+            .left_aligned(),
         );
 
     if focused && placement.area.width >= 34 {
@@ -405,6 +421,14 @@ fn render_progress(
         ])),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+}
+
+fn identity_status_color(status: IdentityStatus, theme: &AppTheme) -> ratatui::style::Color {
+    match status {
+        IdentityStatus::Aspiring => theme.yellow,
+        IdentityStatus::Active => theme.green,
+        IdentityStatus::Former => theme.muted,
+    }
 }
 
 fn card_item_lines(
@@ -579,18 +603,70 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
 fn footer_hints(mode: &Mode, width: u16) -> &'static str {
     match mode {
         Mode::Normal if width >= 105 => {
-            "↑↓ entries  ←→ identities  t new  a add  ↵ edit  Space check  / search  ? help  q quit"
+            "↑↓ entries  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  ? help  q quit"
         }
         Mode::Normal if width >= 72 => {
-            "↑↓ navigate  t new  a add  ↵ edit  / search  ? help  q quit"
+            "↑↓ navigate  t new  a add  s status  ↵ edit  / search  ? help  q quit"
         }
-        Mode::Normal if width >= 48 => "↑↓←→ navigate  t new  a add  / search  ? help",
+        Mode::Normal if width >= 48 => "↑↓←→ navigate  t new  s status  / search  ? help",
         Mode::Normal => "t new  / search  ? help  q quit",
         Mode::Editing(_) => "↵ save  Esc cancel  ←→ cursor",
         Mode::Searching(_) => "type to filter  ↵ keep  Esc clear",
+        Mode::SelectingStatus(_) => "↑↓ choose  ↵ save  Esc cancel",
         Mode::ConfirmDelete(_) => "↵ / y confirm  Esc / n cancel",
         Mode::Help => "Esc / ? close",
     }
+}
+
+fn render_status_picker(frame: &mut Frame<'_>, area: Rect, picker: StatusPicker, theme: &AppTheme) {
+    let popup = centered_rect(area, 42, 9);
+    frame.render_widget(Clear, popup);
+    let block = overlay_block(" Identity status ", theme.accent, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let lines = IdentityStatus::ALL
+        .map(|status| {
+            let selected = status == picker.selected;
+            Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default()
+                        .fg(identity_status_color(status, theme))
+                        .bg(if selected {
+                            theme.selection
+                        } else {
+                            theme.panel
+                        })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    pad_to_width(status.label(), inner.width.saturating_sub(2) as usize),
+                    Style::default()
+                        .fg(identity_status_color(status, theme))
+                        .bg(if selected {
+                            theme.selection
+                        } else {
+                            theme.panel
+                        })
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ])
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        Rect::new(inner.x, inner.y, inner.width, inner.height.min(3)),
+    );
 }
 
 fn render_editor(
@@ -689,12 +765,13 @@ fn render_confirmation(
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
-    let popup = centered_rect(area, 78, 23);
+    let popup = centered_rect(area, 78, 24);
     frame.render_widget(Clear, popup);
     let rows = [
         ("↑ / ↓", "Move between an identity title and its entries"),
         ("← / → or Tab", "Move between identities"),
         ("t / a", "Add an identity / add an entry"),
+        ("s", "Choose Aspiring, Active, or Former status"),
         ("Enter", "Edit the selected title or entry"),
         ("Space", "Check or uncheck the selected entry"),
         ("Delete", "Delete with confirmation"),
@@ -868,7 +945,7 @@ fn display_width(value: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DATA_VERSION, Document, Item, Topic};
+    use crate::model::{DATA_VERSION, Document, IdentityStatus, Item, Topic};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn sample_app() -> App {
@@ -877,6 +954,7 @@ mod tests {
             topics: vec![
                 Topic {
                     name: "Developer".into(),
+                    status: IdentityStatus::Active,
                     items: vec![
                         Item {
                             text: "Build thoughtful terminal interfaces".into(),
@@ -890,6 +968,7 @@ mod tests {
                 },
                 Topic {
                     name: "Mountaineer".into(),
+                    status: IdentityStatus::Aspiring,
                     items: vec![Item {
                         text: "Climb safely".into(),
                         done: false,
@@ -897,6 +976,7 @@ mod tests {
                 },
                 Topic {
                     name: "Writer".into(),
+                    status: IdentityStatus::Former,
                     items: vec![Item {
                         text: "Notice the precise word".into(),
                         done: false,
@@ -904,6 +984,7 @@ mod tests {
                 },
                 Topic {
                     name: "Friend".into(),
+                    status: IdentityStatus::Active,
                     items: Vec::new(),
                 },
             ],
@@ -951,6 +1032,7 @@ mod tests {
             assert!(output.contains("WHO / ME"));
             assert!(output.contains("Developer"));
             assert!(output.contains("Mountaineer"));
+            assert!(output.contains("Active"));
         }
     }
 
@@ -988,5 +1070,17 @@ mod tests {
             .draw(|frame| render(frame, &mut app, &AppTheme::default()))
             .unwrap();
         assert!(rendered(&terminal).contains("Keyboard guide"));
+
+        app.mode = Mode::SelectingStatus(StatusPicker {
+            topic: 0,
+            selected: IdentityStatus::Former,
+        });
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("Identity status"));
+        assert!(output.contains("Aspiring"));
+        assert!(output.contains("Former"));
     }
 }

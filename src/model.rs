@@ -14,7 +14,30 @@ pub struct Document {
 pub struct Topic {
     pub name: String,
     #[serde(default)]
+    pub status: IdentityStatus,
+    #[serde(default)]
     pub items: Vec<Item>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityStatus {
+    Aspiring,
+    #[default]
+    Active,
+    Former,
+}
+
+impl IdentityStatus {
+    pub const ALL: [Self; 3] = [Self::Aspiring, Self::Active, Self::Former];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Aspiring => "Aspiring",
+            Self::Active => "Active",
+            Self::Former => "Former",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,8 +109,32 @@ mod tests {
         document.version = DATA_VERSION;
         document.topics.push(Topic {
             name: "  ".into(),
+            status: IdentityStatus::Active,
             items: Vec::new(),
         });
         assert!(document.validate().unwrap_err().contains("empty name"));
+    }
+
+    #[test]
+    fn identity_status_defaults_and_round_trips() {
+        let legacy: Document = toml::from_str(
+            r#"
+version = 1
+
+[[topics]]
+name = "Developer"
+"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.topics[0].status, IdentityStatus::Active);
+
+        let mut document = legacy;
+        for status in IdentityStatus::ALL {
+            document.topics[0].status = status;
+            let serialized = toml::to_string(&document).unwrap();
+            assert!(serialized.contains(&format!("status = {:?}", status.label().to_lowercase())));
+            let restored: Document = toml::from_str(&serialized).unwrap();
+            assert_eq!(restored.topics[0].status, status);
+        }
     }
 }
