@@ -15,6 +15,8 @@ use crate::model::Document;
 
 const CONFIG_VERSION: u32 = 1;
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const LEGACY_GIT_NAME: &str = "who-me";
+const LEGACY_GIT_EMAIL: &str = "who-me@localhost";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncConfig {
@@ -464,7 +466,7 @@ impl Worker {
             return Err(error);
         }
         fs::rename(&temporary, &self.paths.repository).map_err(|error| error.to_string())?;
-        configure_identity(&self.paths.repository)?;
+        remove_legacy_identity(&self.paths.repository)?;
         Ok(true)
     }
 
@@ -521,7 +523,7 @@ impl Worker {
     ) -> Result<(Document, PreparedState), PrepareError> {
         let config = self.config.as_ref().expect("checked above");
         let repository = &self.paths.repository;
-        configure_identity(repository).map_err(PrepareError::Failure)?;
+        remove_legacy_identity(repository).map_err(PrepareError::Failure)?;
         git(Some(repository.as_path()), &["fetch", "origin"]).map_err(PrepareError::Failure)?;
         let branch = current_branch(repository).unwrap_or_else(|_| config.branch.clone());
         let remote_reference = format!("origin/{branch}");
@@ -772,12 +774,21 @@ fn git_failure_status(error: String) -> SyncStatus {
     }
 }
 
-fn configure_identity(repository: &Path) -> Result<(), String> {
-    git(repository.into(), &["config", "user.name", "who-me"])?;
-    git(
-        repository.into(),
-        &["config", "user.email", "who-me@localhost"],
-    )
+fn remove_legacy_identity(repository: &Path) -> Result<(), String> {
+    for (key, legacy_value) in [
+        ("user.name", LEGACY_GIT_NAME),
+        ("user.email", LEGACY_GIT_EMAIL),
+    ] {
+        let output = git_output(Some(repository), &["config", "--local", "--get", key])?;
+        match output.status.code() {
+            Some(0) if String::from_utf8_lossy(&output.stdout).trim() == legacy_value => {
+                git(Some(repository), &["config", "--local", "--unset-all", key])?;
+            }
+            Some(0 | 1) => {}
+            _ => return Err(command_error(&output)),
+        }
+    }
+    Ok(())
 }
 
 fn current_branch(repository: &Path) -> Result<String, String> {
@@ -981,6 +992,15 @@ mod tests {
         }
     }
 
+    fn configure_test_identity(repository: &Path) {
+        git(Some(repository), &["config", "user.name", "who-me tests"]).unwrap();
+        git(
+            Some(repository),
+            &["config", "user.email", "who-me-tests@localhost"],
+        )
+        .unwrap();
+    }
+
     fn seeded_remote(root: &Path, expected: &Document) -> PathBuf {
         let remote = root.join("remote.git");
         fs::create_dir(&remote).unwrap();
@@ -988,7 +1008,7 @@ mod tests {
         let seed = root.join("seed");
         fs::create_dir(&seed).unwrap();
         git(Some(&seed), &["init", "-b", "main"]).unwrap();
-        configure_identity(&seed).unwrap();
+        configure_test_identity(&seed);
         write_repository_document(&seed, expected).unwrap();
         commit_if_changed(&seed).unwrap();
         git(
@@ -1028,7 +1048,7 @@ mod tests {
         let repository = temp.path().join("repository");
         fs::create_dir(&repository).unwrap();
         git(Some(&repository), &["init", "-b", "main"]).unwrap();
-        configure_identity(&repository).unwrap();
+        configure_test_identity(&repository);
 
         let expected = document("Developer");
         write_repository_document(&repository, &expected).unwrap();
@@ -1041,10 +1061,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_sync_identity_is_removed_without_replacing_custom_identity() {
+        let temp = tempdir().unwrap();
+        git(Some(temp.path()), &["init", "-b", "main"]).unwrap();
+        git(Some(temp.path()), &["config", "user.name", LEGACY_GIT_NAME]).unwrap();
+        git(
+            Some(temp.path()),
+            &["config", "user.email", LEGACY_GIT_EMAIL],
+        )
+        .unwrap();
+
+        remove_legacy_identity(temp.path()).unwrap();
+
+        assert!(git_text(temp.path(), &["config", "--local", "--get", "user.name"]).is_err());
+        assert!(git_text(temp.path(), &["config", "--local", "--get", "user.email"]).is_err());
+
+        configure_test_identity(temp.path());
+        remove_legacy_identity(temp.path()).unwrap();
+        assert_eq!(
+            git_text(temp.path(), &["config", "--local", "--get", "user.name"])
+                .unwrap()
+                .trim(),
+            "who-me tests"
+        );
+    }
+
+    #[test]
     fn malformed_remote_document_is_rejected() {
         let temp = tempdir().unwrap();
         git(Some(temp.path()), &["init", "-b", "main"]).unwrap();
-        configure_identity(temp.path()).unwrap();
+        configure_test_identity(temp.path());
         fs::write(temp.path().join("data.toml"), "not = [valid").unwrap();
         git(Some(temp.path()), &["add", "--", "data.toml"]).unwrap();
         git(Some(temp.path()), &["commit", "-m", "Invalid data"]).unwrap();

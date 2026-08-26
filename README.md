@@ -75,6 +75,8 @@ Writes use a temporary file and atomic rename. Before an existing file is replac
 
 Press `g` to connect a dedicated private GitHub repository. The repository must already exist, the `git` executable must be installed, and access must work through your normal Git credentials: an SSH key, SSH agent, or system Git credential helper. `who-me` accepts GitHub HTTPS and SSH URLs, disables interactive Git credential prompts, and never stores a token.
 
+Sync commits use your normal Git author identity (`user.name` and `user.email`).
+
 The local `data.toml` remains the working copy and is always saved first. A background worker synchronizes the repository's root `data.toml` after edits, at startup, and periodically while the app is open. If the network is unavailable, editing continues and pending changes retry automatically.
 
 When both local and GitHub data changed and Git cannot merge them, the header shows **Conflict**. Open settings with `g` and choose either `l` to keep the current local document or `h` to use GitHub. Both versions are backed up under `$XDG_DATA_HOME/who-me/conflicts/` before resolution.
