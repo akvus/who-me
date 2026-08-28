@@ -541,18 +541,16 @@ impl Worker {
 
         if first_connection
             && let Some(remote) = &remote
-            && !document.topics.is_empty()
-            && !remote.topics.is_empty()
+            && !document.is_empty()
+            && !remote.is_empty()
             && remote != document
         {
             return Err(PrepareError::Conflict(remote.clone()));
         }
 
         if first_connection
-            && document.topics.is_empty()
-            && remote
-                .as_ref()
-                .is_some_and(|remote| !remote.topics.is_empty())
+            && document.is_empty()
+            && remote.as_ref().is_some_and(|remote| !remote.is_empty())
         {
             return Ok((
                 remote.expect("checked above"),
@@ -844,7 +842,8 @@ fn read_git_document(repository: &Path, object: &str) -> Result<Option<Document>
 }
 
 fn parse_document(source: &str) -> Result<Document, String> {
-    let document: Document = toml::from_str(source).map_err(|error| error.to_string())?;
+    let mut document: Document = toml::from_str(source).map_err(|error| error.to_string())?;
+    document.upgrade()?;
     document.validate()?;
     Ok(document)
 }
@@ -978,7 +977,8 @@ fn command_error(output: &GitOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DATA_VERSION, IdentityStatus, Topic};
+    use crate::model::{Calendar, DATA_VERSION, IdentityStatus, Item, Topic};
+    use chrono::NaiveDate;
     use tempfile::tempdir;
 
     fn document(name: &str) -> Document {
@@ -989,7 +989,30 @@ mod tests {
                 status: IdentityStatus::Active,
                 items: Vec::new(),
             }],
+            calendar: Calendar::default(),
         }
+    }
+
+    #[test]
+    fn repository_document_round_trips_calendar_entries() {
+        let temp = tempdir().unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let mut expected = document("Developer");
+        expected.ensure_calendar_day(date).entries.push(Item {
+            text: "Submit report".into(),
+            done: true,
+        });
+
+        write_repository_document(temp.path(), &expected).unwrap();
+
+        assert_eq!(read_worktree_document(temp.path()).unwrap(), expected);
+    }
+
+    #[test]
+    fn synced_parser_upgrades_v1_documents() {
+        let document = parse_document("version = 1\n").unwrap();
+        assert_eq!(document.version, DATA_VERSION);
+        assert!(document.is_empty());
     }
 
     fn configure_test_identity(repository: &Path) {
@@ -1278,6 +1301,7 @@ mod tests {
                     items: Vec::new(),
                 },
             ],
+            calendar: Calendar::default(),
         };
         let remote = seeded_remote(temp.path(), &base);
         let paths = SyncPaths::in_directory(&temp.path().join("client"));

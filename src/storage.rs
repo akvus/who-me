@@ -89,9 +89,14 @@ impl Store {
             path: self.path.clone(),
             source,
         })?;
-        let document: Document = toml::from_str(&source).map_err(|source| StorageError::Parse {
+        let mut document: Document =
+            toml::from_str(&source).map_err(|source| StorageError::Parse {
+                path: self.path.clone(),
+                source,
+            })?;
+        let upgraded = document.upgrade().map_err(|reason| StorageError::Invalid {
             path: self.path.clone(),
-            source,
+            reason,
         })?;
         document
             .validate()
@@ -99,6 +104,9 @@ impl Store {
                 path: self.path.clone(),
                 reason,
             })?;
+        if upgraded {
+            self.save(&document)?;
+        }
         Ok(document)
     }
 
@@ -185,7 +193,7 @@ fn nonempty_env(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DATA_VERSION, IdentityStatus, Item, Topic};
+    use crate::model::{Calendar, DATA_VERSION, IdentityStatus, Item, Topic};
     use tempfile::tempdir;
 
     fn sample() -> Document {
@@ -199,6 +207,7 @@ mod tests {
                     done: true,
                 }],
             }],
+            calendar: Calendar::default(),
         }
     }
 
@@ -248,7 +257,22 @@ mod tests {
         fs::write(&path, "version = 1\n\n[[topics]]\nname = \"Developer\"\n").unwrap();
 
         let document = Store::new(path).load_or_create().unwrap();
+        assert_eq!(document.version, DATA_VERSION);
         assert_eq!(document.topics[0].status, IdentityStatus::Active);
+    }
+
+    #[test]
+    fn legacy_upgrade_preserves_the_v1_backup() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data.toml");
+        let source = "version = 1\n\n[[topics]]\nname = \"Developer\"\n";
+        fs::write(&path, source).unwrap();
+        let store = Store::new(path);
+
+        let document = store.load_or_create().unwrap();
+
+        assert_eq!(document.version, DATA_VERSION);
+        assert_eq!(fs::read_to_string(store.backup_path()).unwrap(), source);
     }
 
     #[test]
@@ -256,6 +280,21 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("data.toml");
         let source = "version = 1\n\n[[topics]]\nname = \"Developer\"\nstatus = \"paused\"\n";
+        fs::write(&path, source).unwrap();
+        let store = Store::new(path.clone());
+
+        assert!(matches!(
+            store.load_or_create(),
+            Err(StorageError::Parse { .. })
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn invalid_calendar_date_is_not_overwritten() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data.toml");
+        let source = "version = 2\n\n[[calendar.days]]\ndate = \"2026-02-30\"\n";
         fs::write(&path, source).unwrap();
         let store = Store::new(path.clone());
 

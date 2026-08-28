@@ -24,7 +24,7 @@ use storage::Store;
 use sync::{ConfigStore, SyncConfig, SyncEvent, SyncPaths, SyncService, SyncStatus};
 use theme::AppTheme;
 
-const HELP: &str = "who-me — a terminal dashboard for the different parts of who you are
+const HELP: &str = "who-me — a terminal dashboard for identities and daily plans
 
 Usage:
   who-me
@@ -34,7 +34,7 @@ Usage:
 Data is stored in $XDG_DATA_HOME/who-me/data.toml, or
 ~/.local/share/who-me/data.toml when XDG_DATA_HOME is not set.
 
-Press g in the dashboard to configure optional private GitHub sync.
+Press 1 for Identities, 2 for Calendar, or g to configure private GitHub sync.
 ";
 
 fn main() {

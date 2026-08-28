@@ -1,3 +1,4 @@
+use chrono::{Datelike, NaiveDate};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Offset, Position, Rect, Size},
@@ -9,7 +10,10 @@ use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, DeleteTarget, EditKind, Editor, Mode, SettingsState, StatusPicker},
+    app::{
+        App, CalendarFocus, DeleteTarget, EditKind, Editor, Feature, Mode, SettingsState,
+        StatusPicker, days_in_month,
+    },
     model::IdentityStatus,
     sync::SyncStatus,
     theme::{AppTheme, TopicVisual},
@@ -36,7 +40,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         .split(area);
 
     render_header(frame, sections[0], app, theme);
-    render_dashboard(frame, sections[1], app, theme);
+    match app.feature {
+        Feature::Identities => render_dashboard(frame, sections[1], app, theme),
+        Feature::Calendar => render_calendar(frame, sections[1], app, theme),
+    }
     render_footer(frame, sections[2], app, theme);
 
     match &app.mode {
@@ -46,7 +53,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         Mode::SelectingStatus(picker) => render_status_picker(frame, area, *picker, theme),
         Mode::ConfirmDelete(target) => render_confirmation(frame, area, app, *target, theme),
         Mode::Settings(settings) => render_settings(frame, area, app, settings, theme),
-        Mode::Help => render_help(frame, area, theme),
+        Mode::Help => render_help(frame, area, app, theme),
         Mode::Normal => {}
     }
 }
@@ -59,15 +66,30 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let count = format!(
-        "{} {}",
-        app.document.topics.len(),
-        if app.document.topics.len() == 1 {
-            "identity"
-        } else {
-            "identities"
+    let count = match app.feature {
+        Feature::Identities => format!(
+            "{} {}",
+            app.document.topics.len(),
+            if app.document.topics.len() == 1 {
+                "identity"
+            } else {
+                "identities"
+            }
+        ),
+        Feature::Calendar => {
+            let entries: usize = app
+                .document
+                .calendar
+                .days
+                .iter()
+                .map(|day| day.entries.len())
+                .sum();
+            format!(
+                "{entries} {}",
+                if entries == 1 { "entry" } else { "entries" }
+            )
         }
-    );
+    };
     let sync = app.sync_status.label();
     let summary = format!("{sync} · {count}");
     let count_width = display_width(&summary)
@@ -85,12 +107,11 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(
-            "a map of what makes you, you",
-            Style::default().fg(theme.dark_foreground),
-        ),
+        feature_tab("1 Identities", app.feature == Feature::Identities, theme),
+        Span::raw(" "),
+        feature_tab("2 Calendar", app.feature == Feature::Calendar, theme),
     ];
-    if !app.query.is_empty() {
+    if app.feature == Feature::Identities && !app.query.is_empty() {
         brand.extend([
             Span::raw("  "),
             Span::styled(
@@ -120,6 +141,288 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
         ]))
         .alignment(Alignment::Right),
         count_area,
+    );
+}
+
+fn feature_tab(label: &str, active: bool, theme: &AppTheme) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default()
+            .fg(if active {
+                theme.background
+            } else {
+                theme.dark_foreground
+            })
+            .bg(if active { theme.cyan } else { theme.background })
+            .add_modifier(if active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )
+}
+
+fn render_calendar(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
+    if area.width < 14 || area.height < 8 {
+        frame.render_widget(
+            Paragraph::new("Calendar needs a little more room")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted).bg(theme.background)),
+            area,
+        );
+        return;
+    }
+
+    let (grid_area, entries_area) = if area.width >= 90 {
+        let [grid, gap, entries] = Layout::horizontal([
+            Constraint::Percentage(66),
+            Constraint::Length(1),
+            Constraint::Min(26),
+        ])
+        .areas(area);
+        let _ = gap;
+        (grid, entries)
+    } else {
+        let grid_height = area.height.clamp(9, 16);
+        let [grid, gap, entries] = Layout::vertical([
+            Constraint::Length(grid_height),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .areas(area);
+        let _ = gap;
+        (grid, entries)
+    };
+    render_month_grid(frame, grid_area, app, theme);
+    render_day_entries(frame, entries_area, app, theme);
+}
+
+fn render_month_grid(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
+    let [title_area, weekdays_area, days_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(6),
+    ])
+    .areas(area);
+    let month_name = app.displayed_month.format("%B %Y").to_string();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" [ ", Style::default().fg(theme.accent)),
+            Span::styled("Previous", Style::default().fg(theme.muted)),
+            Span::styled("    ", Style::default().fg(theme.accent)),
+            Span::styled(
+                month_name,
+                Style::default()
+                    .fg(theme.bright_foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("    ", Style::default().fg(theme.accent)),
+            Span::styled("Next", Style::default().fg(theme.muted)),
+            Span::styled(" ]", Style::default().fg(theme.accent)),
+        ]))
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(theme.background)),
+        title_area,
+    );
+
+    let columns = Layout::horizontal([Constraint::Ratio(1, 7); 7]).split(weekdays_area);
+    for (column, label) in columns
+        .iter()
+        .zip(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+    {
+        frame.render_widget(
+            Paragraph::new(label)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted).bg(theme.background)),
+            *column,
+        );
+    }
+
+    let rows = Layout::vertical([Constraint::Ratio(1, 6); 6]).split(days_area);
+    let offset = app.displayed_month.weekday().num_days_from_monday() as usize;
+    let total_days = days_in_month(app.displayed_month) as usize;
+    for (slot, cell) in rows
+        .iter()
+        .flat_map(|row| {
+            Layout::horizontal([Constraint::Ratio(1, 7); 7])
+                .split(*row)
+                .to_vec()
+        })
+        .enumerate()
+    {
+        let Some(day_number) = slot
+            .checked_sub(offset)
+            .map(|day| day + 1)
+            .filter(|day| *day <= total_days)
+        else {
+            continue;
+        };
+        let date = app
+            .displayed_month
+            .with_day(day_number as u32)
+            .expect("calendar day is valid");
+        render_calendar_day(frame, cell, app, date, theme);
+    }
+}
+
+fn render_calendar_day(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    date: NaiveDate,
+    theme: &AppTheme,
+) {
+    let selected = date == app.selected_date;
+    let today = date == app.today;
+    let focused = selected && app.calendar_focus == CalendarFocus::Grid;
+    let background = if selected {
+        theme.selection
+    } else {
+        theme.dark_background
+    };
+    let border = if focused {
+        theme.accent
+    } else if today {
+        theme.green
+    } else {
+        theme.muted
+    };
+    let entries = app
+        .document
+        .calendar_day(date)
+        .map(|day| day.entries.as_slice())
+        .unwrap_or(&[]);
+    let done = entries.iter().filter(|entry| entry.done).count();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border).bg(background))
+        .style(Style::default().bg(background));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.is_empty() {
+        return;
+    }
+    let mut lines = vec![Line::from(Span::styled(
+        date.day().to_string(),
+        Style::default()
+            .fg(if today {
+                theme.green
+            } else {
+                theme.bright_foreground
+            })
+            .bg(background)
+            .add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    ))];
+    if inner.height >= 2 && !entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("{done}/{} done", entries.len()),
+            Style::default().fg(theme.muted).bg(background),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(background)),
+        inner,
+    );
+}
+
+fn render_day_entries(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
+    if area.is_empty() {
+        return;
+    }
+    let focused = app.calendar_focus == CalendarFocus::Entries;
+    let title = format!(
+        " {} · {} ",
+        app.selected_date.format("%A, %B %-d"),
+        app.selected_calendar_entries().len()
+    );
+    let block = Block::default()
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(if focused { theme.accent } else { theme.muted })
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .padding(Padding::horizontal(1))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let entry_count = app.selected_calendar_entries().len();
+    if entry_count == 0 {
+        frame.render_widget(
+            Paragraph::new("Press a to add the first entry")
+                .style(Style::default().fg(theme.dark_foreground).bg(theme.panel)),
+            inner,
+        );
+        app.calendar_scroll = 0;
+        return;
+    }
+    let visible_height = inner.height as usize;
+    if let Some(selected) = app.selected_calendar_entry {
+        if selected < app.calendar_scroll as usize {
+            app.calendar_scroll = selected as u16;
+        } else if selected >= app.calendar_scroll as usize + visible_height {
+            app.calendar_scroll = selected.saturating_add(1).saturating_sub(visible_height) as u16;
+        }
+    }
+    app.calendar_scroll = app
+        .calendar_scroll
+        .min(entry_count.saturating_sub(visible_height) as u16);
+    let lines = app
+        .selected_calendar_entries()
+        .iter()
+        .enumerate()
+        .skip(app.calendar_scroll as usize)
+        .take(visible_height)
+        .map(|(index, entry)| {
+            let selected = focused && app.selected_calendar_entry == Some(index);
+            let background = if selected {
+                theme.selection
+            } else {
+                theme.panel
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(theme.accent).bg(background),
+                ),
+                Span::styled(
+                    if entry.done { "✓ " } else { "○ " },
+                    Style::default()
+                        .fg(if entry.done { theme.green } else { theme.muted })
+                        .bg(background),
+                ),
+                Span::styled(
+                    pad_to_width(
+                        &truncate_to_width(&entry.text, inner.width.saturating_sub(4) as usize),
+                        inner.width.saturating_sub(4) as usize,
+                    ),
+                    Style::default()
+                        .fg(if entry.done {
+                            theme.dark_foreground
+                        } else {
+                            theme.foreground
+                        })
+                        .bg(background)
+                        .add_modifier(if entry.done {
+                            Modifier::CROSSED_OUT
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
     );
 }
 
@@ -591,7 +894,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
         }),
     ])
     .areas(area);
-    let hints = footer_hints(&app.mode, hint_area.width);
+    let hints = footer_hints(app, hint_area.width);
     frame.render_widget(
         Paragraph::new(hints).style(Style::default().fg(theme.muted).bg(theme.background)),
         hint_area,
@@ -614,23 +917,32 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
     }
 }
 
-fn footer_hints(mode: &Mode, width: u16) -> &'static str {
-    match mode {
-        Mode::Normal if width >= 105 => {
-            "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  g sync  ? help  q quit"
+fn footer_hints(app: &App, width: u16) -> &'static str {
+    match (&app.mode, app.feature) {
+        (Mode::Normal, Feature::Calendar) if width >= 100 => {
+            "↑↓←→ days  Tab grid/list  [ ] month  a add  ↵ edit  Space check  d delete  1 identities  g sync"
         }
-        Mode::Normal if width >= 80 => {
-            "↑↓ navigate  t new  a add  s status  ↵ edit  / search  g sync  ? help  q quit"
+        (Mode::Normal, Feature::Calendar) if width >= 65 => {
+            "↑↓←→ days  Tab focus  [ ] month  a add  ↵ edit  Space check  1 identities"
         }
-        Mode::Normal if width >= 58 => "↑↓←→ navigate  t new  s status  / search  g sync  ? help",
-        Mode::Normal => "t new  g sync  ? help  q quit",
-        Mode::Editing(_) => "↵ save  Esc cancel  ←→ cursor",
-        Mode::Searching(_) => "type to filter  ↵ keep  Esc clear",
-        Mode::SelectingStatus(_) => "↑↓ choose  ↵ save  Esc cancel",
-        Mode::ConfirmDelete(_) => "↵ / y confirm  Esc / n cancel",
-        Mode::Settings(settings) if settings.editing => "↵ connect  Esc cancel  ←→ cursor",
-        Mode::Settings(_) => "e edit  r sync  x disconnect  g / Esc close",
-        Mode::Help => "Esc / ? close",
+        (Mode::Normal, Feature::Calendar) => "[ ] month  a add  1 identities  ? help  q quit",
+        (Mode::Normal, Feature::Identities) if width >= 105 => {
+            "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  2 calendar"
+        }
+        (Mode::Normal, Feature::Identities) if width >= 80 => {
+            "↑↓ navigate  t new  a add  s status  ↵ edit  / search  2 calendar"
+        }
+        (Mode::Normal, Feature::Identities) if width >= 58 => {
+            "↑↓←→ navigate  t new  s status  / search  2 calendar"
+        }
+        (Mode::Normal, Feature::Identities) => "t new  2 calendar  ? help  q quit",
+        (Mode::Editing(_), _) => "↵ save  Esc cancel  ←→ cursor",
+        (Mode::Searching(_), _) => "type to filter  ↵ keep  Esc clear",
+        (Mode::SelectingStatus(_), _) => "↑↓ choose  ↵ save  Esc cancel",
+        (Mode::ConfirmDelete(_), _) => "↵ / y confirm  Esc / n cancel",
+        (Mode::Settings(settings), _) if settings.editing => "↵ connect  Esc cancel  ←→ cursor",
+        (Mode::Settings(_), _) => "e edit  r sync  x disconnect  g / Esc close",
+        (Mode::Help, _) => "Esc / ? close",
     }
 }
 
@@ -845,6 +1157,8 @@ fn render_editor(
         EditKind::RenameTopic(_) => " Rename identity ",
         EditKind::AddItem(_) => " New entry ",
         EditKind::EditItem(_, _) => " Edit entry ",
+        EditKind::AddCalendarEntry(_) => " New calendar entry ",
+        EditKind::EditCalendarEntry(_, _) => " Edit calendar entry ",
         EditKind::Search => " / Search everything ",
     };
     let block = overlay_block(title, theme.accent, theme);
@@ -895,6 +1209,12 @@ fn render_confirmation(
             .and_then(|topic| topic.items.get(item))
             .map(|item| format!("Delete entry {:?}?", item.text))
             .unwrap_or_else(|| "Delete this entry?".into()),
+        DeleteTarget::CalendarEntry(date, entry) => app
+            .document
+            .calendar_day(date)
+            .and_then(|day| day.entries.get(entry))
+            .map(|entry| format!("Delete {:?} from {}?", entry.text, date))
+            .unwrap_or_else(|| "Delete this calendar entry?".into()),
     };
     let block = overlay_block(" Confirm deletion ", theme.red, theme);
     frame.render_widget(
@@ -921,24 +1241,31 @@ fn render_confirmation(
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
+fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
     let popup = centered_rect(area, 78, 25);
     frame.render_widget(Clear, popup);
-    let rows = [
-        ("↑ / ↓", "Move through identity titles and entries"),
-        ("← / → or Tab", "Move between identities"),
-        ("t / a", "Add an identity / add an entry"),
-        ("s", "Choose Aspiring, Active, or Former status"),
-        ("Enter", "Edit the selected title or entry"),
-        ("Space", "Check or uncheck the selected entry"),
-        ("d", "Delete with confirmation"),
-        ("Ctrl + ↑ / ↓", "Reorder the selected entry"),
-        ("Ctrl + ← / →", "Reorder the selected identity"),
-        ("/", "Search identity names and entry text"),
-        ("g", "Open GitHub sync settings"),
-        ("Esc", "Clear search or close the current view"),
-        ("q", "Quit"),
-    ];
+    let rows = match app.feature {
+        Feature::Identities => [
+            ("↑ / ↓", "Move through identity titles and entries"),
+            ("← / → or Tab", "Move between identities"),
+            ("t / a", "Add an identity / add an entry"),
+            ("s", "Choose the identity status"),
+            ("Enter / Space", "Edit / check the selected entry"),
+            ("d", "Delete with confirmation"),
+            ("Ctrl + arrows", "Reorder entries or identities"),
+            ("/", "Search identities and entries"),
+        ],
+        Feature::Calendar => [
+            ("Arrow keys", "Move between days or day entries"),
+            ("Tab", "Switch focus between grid and checklist"),
+            ("[ / ]", "Show the previous / next month"),
+            ("a", "Add an entry to the selected day"),
+            ("Enter / Space", "Edit / check the selected entry"),
+            ("d", "Delete with confirmation"),
+            ("Ctrl + ↑ / ↓", "Reorder the selected entry"),
+            ("Esc", "Return focus to the month grid"),
+        ],
+    };
     let mut lines = vec![Line::from("")];
     for (key, description) in rows {
         lines.push(Line::from(vec![
@@ -948,6 +1275,26 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, theme: &AppTheme) {
     }
     lines.extend([
         Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("{:<18}", "1 / 2"),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled(
+                "Switch Identities / Calendar",
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("{:<18}", "g / q"),
+                Style::default().fg(theme.accent),
+            ),
+            Span::styled(
+                "GitHub settings / quit",
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
         Line::from(Span::styled(
             "Changes save immediately · Esc or ? closes this guide",
             Style::default().fg(theme.muted),
@@ -1103,7 +1450,7 @@ fn display_width(value: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DATA_VERSION, Document, IdentityStatus, Item, Topic};
+    use crate::model::{Calendar, DATA_VERSION, Document, IdentityStatus, Item, Topic};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn sample_app() -> App {
@@ -1146,6 +1493,7 @@ mod tests {
                     items: Vec::new(),
                 },
             ],
+            calendar: Calendar::default(),
         })
     }
 
@@ -1255,5 +1603,29 @@ mod tests {
         let output = rendered(&terminal);
         assert!(output.contains("GitHub sync settings"));
         assert!(output.contains("Synced"));
+    }
+
+    #[test]
+    fn renders_calendar_in_wide_and_stacked_layouts() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        for (width, height) in [(120, 32), (70, 28)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_at(Document::default(), today);
+            app.feature = Feature::Calendar;
+            app.document.ensure_calendar_day(today).entries.push(Item {
+                text: "Submit report".into(),
+                done: false,
+            });
+            terminal
+                .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+                .unwrap();
+            let output = rendered(&terminal);
+            assert!(output.contains("2 Calendar"));
+            assert!(output.contains("August 2026"));
+            assert!(output.contains("Submit report"));
+            assert!(output.contains("Mon"));
+            assert!(output.contains("Sun"));
+        }
     }
 }
