@@ -2,7 +2,7 @@ use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    model::{Document, IdentityStatus, Item, Topic},
+    model::{Document, IdentityStatus, Item, MoodRating, Topic},
     sync::{ConflictChoice, SyncStatus, validate_github_url},
 };
 
@@ -12,6 +12,7 @@ pub enum Mode {
     Editing(Editor),
     Searching(Editor),
     SelectingStatus(StatusPicker),
+    SelectingMood(MoodPicker),
     ConfirmDelete(DeleteTarget),
     Settings(SettingsState),
     Help,
@@ -29,6 +30,12 @@ pub struct SettingsState {
 pub struct StatusPicker {
     pub topic: usize,
     pub selected: IdentityStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoodPicker {
+    pub date: NaiveDate,
+    pub selected: MoodRating,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +68,38 @@ pub enum Feature {
     #[default]
     Identities,
     Calendar,
+    Statistics,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StatisticsPeriod {
+    #[default]
+    Month,
+    Year,
+    Forever,
+}
+
+impl StatisticsPeriod {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Month => "Last 30 days",
+            Self::Year => "Last 365 days",
+            Self::Forever => "Forever",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MoodStatistics {
+    pub counts: [usize; 5],
+    pub rated_days: usize,
+    pub total: usize,
+}
+
+impl MoodStatistics {
+    pub fn average(self) -> Option<f64> {
+        (self.rated_days > 0).then_some(self.total as f64 / self.rated_days as f64)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -101,6 +140,7 @@ pub struct App {
     pub selected_calendar_entry: Option<usize>,
     pub calendar_focus: CalendarFocus,
     pub calendar_scroll: u16,
+    pub statistics_period: StatisticsPeriod,
     pub sync_status: SyncStatus,
     pub sync_repository: Option<String>,
     pub sync_branch: Option<String>,
@@ -128,6 +168,7 @@ impl App {
             selected_calendar_entry: None,
             calendar_focus: CalendarFocus::Grid,
             calendar_scroll: 0,
+            statistics_period: StatisticsPeriod::Month,
             sync_status: SyncStatus::LocalOnly,
             sync_repository: None,
             sync_branch: None,
@@ -187,6 +228,30 @@ impl App {
                 }
                 _ => {
                     self.mode = Mode::SelectingStatus(picker);
+                    HandleResult::default()
+                }
+            },
+            Mode::SelectingMood(mut picker) => match key.code {
+                KeyCode::Esc => HandleResult::default(),
+                KeyCode::Enter => self.commit_mood(picker.date, Some(picker.selected)),
+                KeyCode::Char('c' | 'C') => self.commit_mood(picker.date, None),
+                KeyCode::Char(character @ '1'..='5') => {
+                    let rating = MoodRating::try_from(character as u8 - b'0')
+                        .expect("matched mood rating range");
+                    self.commit_mood(picker.date, Some(rating))
+                }
+                KeyCode::Up | KeyCode::Left => {
+                    picker.selected = adjacent_mood(picker.selected, -1);
+                    self.mode = Mode::SelectingMood(picker);
+                    HandleResult::default()
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    picker.selected = adjacent_mood(picker.selected, 1);
+                    self.mode = Mode::SelectingMood(picker);
+                    HandleResult::default()
+                }
+                _ => {
+                    self.mode = Mode::SelectingMood(picker);
                     HandleResult::default()
                 }
             },
@@ -261,6 +326,27 @@ impl App {
             .unwrap_or(&[])
     }
 
+    pub fn mood_statistics(&self) -> MoodStatistics {
+        let start = match self.statistics_period {
+            StatisticsPeriod::Month => self.today.checked_sub_days(Days::new(29)),
+            StatisticsPeriod::Year => self.today.checked_sub_days(Days::new(364)),
+            StatisticsPeriod::Forever => None,
+        };
+        let mut statistics = MoodStatistics::default();
+        for day in &self.document.calendar.days {
+            if day.date > self.today || start.is_some_and(|start| day.date < start) {
+                continue;
+            }
+            let Some(mood) = day.mood else {
+                continue;
+            };
+            statistics.counts[mood.value() as usize - 1] += 1;
+            statistics.rated_days += 1;
+            statistics.total += mood.value() as usize;
+        }
+        statistics
+    }
+
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.status = Some(message.into());
     }
@@ -327,12 +413,17 @@ impl App {
                 self.feature = Feature::Calendar;
                 return HandleResult::default();
             }
+            KeyCode::Char('3') => {
+                self.feature = Feature::Statistics;
+                return HandleResult::default();
+            }
             _ => {}
         }
 
         match self.feature {
             Feature::Identities => self.handle_identities(key),
             Feature::Calendar => self.handle_calendar(key),
+            Feature::Statistics => self.handle_statistics(key),
         }
     }
 
@@ -496,6 +587,18 @@ impl App {
                 });
                 HandleResult::default()
             }
+            KeyCode::Char('r') => {
+                let selected = self
+                    .document
+                    .calendar_day(self.selected_date)
+                    .and_then(|day| day.mood)
+                    .unwrap_or(MoodRating::NEUTRAL);
+                self.mode = Mode::SelectingMood(MoodPicker {
+                    date: self.selected_date,
+                    selected,
+                });
+                HandleResult::default()
+            }
             KeyCode::Enter if self.calendar_focus == CalendarFocus::Grid => {
                 self.calendar_focus = CalendarFocus::Entries;
                 self.selected_calendar_entry =
@@ -559,6 +662,16 @@ impl App {
             }
             _ => HandleResult::default(),
         }
+    }
+
+    fn handle_statistics(&mut self, key: KeyEvent) -> HandleResult {
+        self.statistics_period = match key.code {
+            KeyCode::Char('m' | 'M') => StatisticsPeriod::Month,
+            KeyCode::Char('y' | 'Y') => StatisticsPeriod::Year,
+            KeyCode::Char('f' | 'F') => StatisticsPeriod::Forever,
+            _ => return HandleResult::default(),
+        };
+        HandleResult::default()
     }
 
     fn handle_settings(&mut self, key: KeyEvent, settings: &mut SettingsState) -> HandleResult {
@@ -713,6 +826,25 @@ impl App {
         }
         topic.status = picker.selected;
         self.status = Some(format!("Identity is now {}", picker.selected.label()));
+        HandleResult {
+            changed: true,
+            ..HandleResult::default()
+        }
+    }
+
+    fn commit_mood(&mut self, date: NaiveDate, mood: Option<MoodRating>) -> HandleResult {
+        let current = self.document.calendar_day(date).and_then(|day| day.mood);
+        if current == mood {
+            return HandleResult::default();
+        }
+        if let Some(mood) = mood {
+            self.document.ensure_calendar_day(date).mood = Some(mood);
+            self.status = Some(format!("Mood saved: {} — {}", mood.value(), mood.label()));
+        } else if let Some(day) = self.document.calendar_day_mut(date) {
+            day.mood = None;
+            self.document.remove_calendar_day_if_empty(date);
+            self.status = Some("Mood rating cleared".into());
+        }
         HandleResult {
             changed: true,
             ..HandleResult::default()
@@ -1039,6 +1171,19 @@ fn adjacent_status(status: IdentityStatus, direction: isize) -> IdentityStatus {
     IdentityStatus::ALL[next]
 }
 
+fn adjacent_mood(mood: MoodRating, direction: isize) -> MoodRating {
+    let position = MoodRating::ALL
+        .iter()
+        .position(|candidate| *candidate == mood)
+        .unwrap_or(2);
+    let next = if direction < 0 {
+        position.saturating_sub(1)
+    } else {
+        (position + 1).min(MoodRating::ALL.len() - 1)
+    };
+    MoodRating::ALL[next]
+}
+
 fn edit_text(editor: &mut Editor, key: KeyEvent) {
     edit_value(&mut editor.input, &mut editor.cursor, key);
 }
@@ -1362,5 +1507,55 @@ mod tests {
             days_in_month(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()),
             31
         );
+    }
+
+    #[test]
+    fn rates_and_clears_a_day_without_calendar_entries() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let mut app = App::new_at(Document::default(), date);
+        app.feature = Feature::Calendar;
+
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(matches!(app.mode, Mode::SelectingMood(_)));
+        assert!(app.handle_key(key(KeyCode::Char('5'))).changed);
+        assert_eq!(
+            app.document.calendar_day(date).unwrap().mood,
+            Some(MoodRating::try_from(5).unwrap())
+        );
+        assert!(app.document.calendar_day(date).unwrap().entries.is_empty());
+
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(app.handle_key(key(KeyCode::Char('c'))).changed);
+        assert!(app.document.calendar_day(date).is_none());
+    }
+
+    #[test]
+    fn mood_statistics_use_rolling_periods_and_exclude_future_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let mut app = App::new_at(Document::default(), today);
+        for (offset, rating) in [(0, 5), (29, 1), (30, 2), (364, 4), (365, 3)] {
+            let date = today.checked_sub_days(Days::new(offset)).unwrap();
+            app.document.ensure_calendar_day(date).mood =
+                Some(MoodRating::try_from(rating).unwrap());
+        }
+        let future = today.checked_add_days(Days::new(1)).unwrap();
+        app.document.ensure_calendar_day(future).mood = Some(MoodRating::try_from(5).unwrap());
+
+        let month = app.mood_statistics();
+        assert_eq!(month.counts, [1, 0, 0, 0, 1]);
+        assert_eq!(month.rated_days, 2);
+        assert_eq!(month.average(), Some(3.0));
+
+        app.statistics_period = StatisticsPeriod::Year;
+        let year = app.mood_statistics();
+        assert_eq!(year.counts, [1, 1, 0, 1, 1]);
+        assert_eq!(year.rated_days, 4);
+
+        app.feature = Feature::Statistics;
+        app.handle_key(key(KeyCode::Char('f')));
+        let forever = app.mood_statistics();
+        assert_eq!(forever.counts, [1, 1, 1, 1, 1]);
+        assert_eq!(forever.rated_days, 5);
+        assert_eq!(forever.average(), Some(3.0));
     }
 }

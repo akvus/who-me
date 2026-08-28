@@ -11,10 +11,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, CalendarFocus, DeleteTarget, EditKind, Editor, Feature, Mode, SettingsState,
-        StatusPicker, days_in_month,
+        App, CalendarFocus, DeleteTarget, EditKind, Editor, Feature, Mode, MoodPicker,
+        SettingsState, StatisticsPeriod, StatusPicker, days_in_month,
     },
-    model::IdentityStatus,
+    model::{IdentityStatus, MoodRating},
     sync::SyncStatus,
     theme::{AppTheme, TopicVisual},
 };
@@ -43,6 +43,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
     match app.feature {
         Feature::Identities => render_dashboard(frame, sections[1], app, theme),
         Feature::Calendar => render_calendar(frame, sections[1], app, theme),
+        Feature::Statistics => render_statistics(frame, sections[1], app, theme),
     }
     render_footer(frame, sections[2], app, theme);
 
@@ -51,6 +52,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
             render_editor(frame, area, editor, app.status.as_deref(), theme)
         }
         Mode::SelectingStatus(picker) => render_status_picker(frame, area, *picker, theme),
+        Mode::SelectingMood(picker) => render_mood_picker(frame, area, *picker, theme),
         Mode::ConfirmDelete(target) => render_confirmation(frame, area, app, *target, theme),
         Mode::Settings(settings) => render_settings(frame, area, app, settings, theme),
         Mode::Help => render_help(frame, area, app, theme),
@@ -89,6 +91,18 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
                 if entries == 1 { "entry" } else { "entries" }
             )
         }
+        Feature::Statistics => {
+            let statistics = app.mood_statistics();
+            format!(
+                "{} rated {}",
+                statistics.rated_days,
+                if statistics.rated_days == 1 {
+                    "day"
+                } else {
+                    "days"
+                }
+            )
+        }
     };
     let sync = app.sync_status.label();
     let summary = format!("{sync} · {count}");
@@ -98,6 +112,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
     let [brand_area, count_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(count_width)]).areas(inner);
 
+    let compact_tabs = brand_area.width < 58;
     let mut brand = vec![
         Span::styled(
             " WHO / ME ",
@@ -107,9 +122,27 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        feature_tab("1 Identities", app.feature == Feature::Identities, theme),
+        feature_tab(
+            if compact_tabs { "1 ID" } else { "1 Identities" },
+            app.feature == Feature::Identities,
+            theme,
+        ),
         Span::raw(" "),
-        feature_tab("2 Calendar", app.feature == Feature::Calendar, theme),
+        feature_tab(
+            if compact_tabs { "2 CAL" } else { "2 Calendar" },
+            app.feature == Feature::Calendar,
+            theme,
+        ),
+        Span::raw(" "),
+        feature_tab(
+            if compact_tabs {
+                "3 STATS"
+            } else {
+                "3 Statistics"
+            },
+            app.feature == Feature::Statistics,
+            theme,
+        ),
     ];
     if app.feature == Feature::Identities && !app.query.is_empty() {
         brand.extend([
@@ -284,27 +317,31 @@ fn render_calendar_day(
         theme.accent
     } else if today {
         theme.green
+    } else if let Some(mood) = app.document.calendar_day(date).and_then(|day| day.mood) {
+        mood_color(mood, theme)
     } else {
         theme.muted
     };
-    let entries = app
-        .document
-        .calendar_day(date)
-        .map(|day| day.entries.as_slice())
-        .unwrap_or(&[]);
-    let done = entries.iter().filter(|entry| entry.done).count();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border).bg(background))
-        .style(Style::default().bg(background));
+    let day = app.document.calendar_day(date);
+    let entries = day.map(|day| day.entries.as_slice()).unwrap_or(&[]);
+    let bordered = area.height >= 6 && area.width >= 7;
+    let block = if bordered {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border).bg(background))
+            .style(Style::default().bg(background))
+    } else {
+        Block::default().style(Style::default().bg(background))
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.is_empty() {
         return;
     }
-    let mut lines = vec![Line::from(Span::styled(
-        date.day().to_string(),
+    let date_text = date.day().to_string();
+    let mut heading = vec![Span::styled(
+        date_text.clone(),
         Style::default()
             .fg(if today {
                 theme.green
@@ -317,12 +354,37 @@ fn render_calendar_day(
             } else {
                 Modifier::empty()
             }),
-    ))];
-    if inner.height >= 2 && !entries.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("{done}/{} done", entries.len()),
-            Style::default().fg(theme.muted).bg(background),
-        )));
+    )];
+    if let Some(mood) = day.and_then(|day| day.mood) {
+        let mood_width = (inner.width as usize).saturating_sub(display_width(&date_text));
+        heading.push(Span::styled(
+            truncate_to_width(&format!(" · {} {}", mood.value(), mood.label()), mood_width),
+            Style::default().fg(mood_color(mood, theme)).bg(background),
+        ));
+    }
+    let mut lines = vec![Line::from(heading)];
+    let entry_width = inner.width.saturating_sub(2) as usize;
+    for entry in entries.iter().take(inner.height.saturating_sub(1) as usize) {
+        let marker = if entry.done { "✓ " } else { "○ " };
+        let mut text_style = Style::default()
+            .fg(if entry.done {
+                theme.dark_foreground
+            } else {
+                theme.foreground
+            })
+            .bg(background);
+        if entry.done {
+            text_style = text_style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                marker,
+                Style::default()
+                    .fg(if entry.done { theme.green } else { theme.muted })
+                    .bg(background),
+            ),
+            Span::styled(truncate_to_width(&entry.text, entry_width), text_style),
+        ]));
     }
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(background)),
@@ -335,9 +397,16 @@ fn render_day_entries(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         return;
     }
     let focused = app.calendar_focus == CalendarFocus::Entries;
+    let mood = app
+        .document
+        .calendar_day(app.selected_date)
+        .and_then(|day| day.mood)
+        .map(|mood| format!("{} {}", mood.value(), mood.label()))
+        .unwrap_or_else(|| "Unrated".into());
     let title = format!(
-        " {} · {} ",
+        " {} · {} · {} ",
         app.selected_date.format("%A, %B %-d"),
+        mood,
         app.selected_calendar_entries().len()
     );
     let block = Block::default()
@@ -424,6 +493,185 @@ fn render_day_entries(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &
         Paragraph::new(lines).style(Style::default().bg(theme.panel)),
         inner,
     );
+}
+
+fn render_statistics(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
+    if area.width < 20 || area.height < 8 {
+        frame.render_widget(
+            Paragraph::new("Statistics needs a little more room")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted).bg(theme.background)),
+            area,
+        );
+        return;
+    }
+
+    let outer = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let block = Block::default()
+        .title(format!(
+            " Mood statistics · {} ",
+            app.statistics_period.label()
+        ))
+        .title_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .padding(Padding::new(2, 2, 1, 1))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(outer);
+    frame.render_widget(block, outer);
+
+    let statistics = app.mood_statistics();
+    let selected_period = app.statistics_period;
+    let period_line = Line::from(vec![
+        statistics_tab(
+            "m",
+            "Last 30 days",
+            selected_period == StatisticsPeriod::Month,
+            theme,
+        ),
+        Span::raw("  "),
+        statistics_tab(
+            "y",
+            "Last 365 days",
+            selected_period == StatisticsPeriod::Year,
+            theme,
+        ),
+        Span::raw("  "),
+        statistics_tab(
+            "f",
+            "Forever",
+            selected_period == StatisticsPeriod::Forever,
+            theme,
+        ),
+    ]);
+    let mut lines = vec![period_line, Line::from("")];
+    let Some(average) = statistics.average() else {
+        lines.extend([
+            Line::from(Span::styled(
+                "No mood ratings in this period yet",
+                Style::default()
+                    .fg(theme.bright_foreground)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Open Calendar, select a day, and press r to rate it.",
+                Style::default().fg(theme.muted),
+            )),
+        ]);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: true })
+                .style(Style::default().bg(theme.panel)),
+            inner,
+        );
+        return;
+    };
+
+    lines.extend([
+        Line::from(vec![
+            Span::styled(
+                format!("{average:.2}"),
+                Style::default()
+                    .fg(mood_average_color(average, theme))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" / 5 average", Style::default().fg(theme.foreground)),
+            Span::styled(
+                format!(
+                    "   ·   {} rated {}",
+                    statistics.rated_days,
+                    if statistics.rated_days == 1 {
+                        "day"
+                    } else {
+                        "days"
+                    }
+                ),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        Line::from(""),
+    ]);
+    let label_width = 14usize;
+    let reserved = label_width.saturating_add(14);
+    let bar_width = (inner.width as usize).saturating_sub(reserved).max(1);
+    for mood in MoodRating::ALL.into_iter().rev() {
+        let count = statistics.counts[mood.value() as usize - 1];
+        let percentage = count * 100 / statistics.rated_days;
+        let filled = count * bar_width / statistics.rated_days;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} {:<10}", mood.value(), mood.label()),
+                Style::default().fg(mood_color(mood, theme)),
+            ),
+            Span::styled(
+                "█".repeat(filled),
+                Style::default().fg(mood_color(mood, theme)),
+            ),
+            Span::styled(
+                "░".repeat(bar_width.saturating_sub(filled)),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                format!("  {count:>3}  {percentage:>3}%"),
+                Style::default().fg(theme.foreground),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn statistics_tab(key: &str, label: &str, selected: bool, theme: &AppTheme) -> Span<'static> {
+    Span::styled(
+        format!(" {key} {label} "),
+        Style::default()
+            .fg(if selected {
+                theme.background
+            } else {
+                theme.muted
+            })
+            .bg(if selected { theme.accent } else { theme.panel })
+            .add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+    )
+}
+
+fn mood_color(mood: MoodRating, theme: &AppTheme) -> ratatui::style::Color {
+    match mood.value() {
+        1 => theme.red,
+        2 => theme.yellow,
+        3 => theme.muted,
+        4 => theme.cyan,
+        5 => theme.green,
+        _ => theme.muted,
+    }
+}
+
+fn mood_average_color(average: f64, theme: &AppTheme) -> ratatui::style::Color {
+    let rounded = average.round().clamp(1.0, 5.0) as u8;
+    mood_color(
+        MoodRating::try_from(rounded).expect("average is clamped to mood range"),
+        theme,
+    )
 }
 
 fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
@@ -920,12 +1168,15 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
 fn footer_hints(app: &App, width: u16) -> &'static str {
     match (&app.mode, app.feature) {
         (Mode::Normal, Feature::Calendar) if width >= 100 => {
-            "↑↓←→ days  Tab grid/list  [ ] month  a add  ↵ edit  Space check  d delete  1 identities  g sync"
+            "↑↓←→ days  Tab grid/list  [ ] month  r rate  a add  ↵ edit  Space check  3 statistics"
         }
         (Mode::Normal, Feature::Calendar) if width >= 65 => {
-            "↑↓←→ days  Tab focus  [ ] month  a add  ↵ edit  Space check  1 identities"
+            "↑↓←→ days  Tab focus  [ ] month  r rate  a add  3 statistics"
         }
-        (Mode::Normal, Feature::Calendar) => "[ ] month  a add  1 identities  ? help  q quit",
+        (Mode::Normal, Feature::Calendar) => "[ ] month  r rate  a add  3 stats  ? help",
+        (Mode::Normal, Feature::Statistics) => {
+            "m 30 days  y 365 days  f forever  2 calendar  ? help  q quit"
+        }
         (Mode::Normal, Feature::Identities) if width >= 105 => {
             "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  2 calendar"
         }
@@ -939,6 +1190,7 @@ fn footer_hints(app: &App, width: u16) -> &'static str {
         (Mode::Editing(_), _) => "↵ save  Esc cancel  ←→ cursor",
         (Mode::Searching(_), _) => "type to filter  ↵ keep  Esc clear",
         (Mode::SelectingStatus(_), _) => "↑↓ choose  ↵ save  Esc cancel",
+        (Mode::SelectingMood(_), _) => "1–5 save  ↑↓ choose  c clear  Esc cancel",
         (Mode::ConfirmDelete(_), _) => "↵ / y confirm  Esc / n cancel",
         (Mode::Settings(settings), _) if settings.editing => "↵ connect  Esc cancel  ←→ cursor",
         (Mode::Settings(_), _) => "e edit  r sync  x disconnect  g / Esc close",
@@ -1138,6 +1390,54 @@ fn render_status_picker(frame: &mut Frame<'_>, area: Rect, picker: StatusPicker,
     );
 }
 
+fn render_mood_picker(frame: &mut Frame<'_>, area: Rect, picker: MoodPicker, theme: &AppTheme) {
+    let popup = centered_rect(area, 52, 13);
+    frame.render_widget(Clear, popup);
+    let block = overlay_block(" Rate this day ", mood_color(picker.selected, theme), theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = MoodRating::ALL
+        .map(|mood| {
+            let selected = mood == picker.selected;
+            let background = if selected {
+                theme.selection
+            } else {
+                theme.panel
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(mood_color(mood, theme)).bg(background),
+                ),
+                Span::styled(
+                    format!("{}  {:<10}", mood.value(), mood.label()),
+                    Style::default()
+                        .fg(mood_color(mood, theme))
+                        .bg(background)
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ])
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    lines.extend([
+        Line::from(""),
+        Line::from(Span::styled(
+            "1–5 save · ↑↓ choose · c clear · Esc cancel",
+            Style::default().fg(theme.muted).bg(theme.panel),
+        )),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
 fn render_editor(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1259,11 +1559,21 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
             ("Arrow keys", "Move between days or day entries"),
             ("Tab", "Switch focus between grid and checklist"),
             ("[ / ]", "Show the previous / next month"),
-            ("a", "Add an entry to the selected day"),
+            ("r / a", "Rate the day / add an entry"),
             ("Enter / Space", "Edit / check the selected entry"),
             ("d", "Delete with confirmation"),
             ("Ctrl + ↑ / ↓", "Reorder the selected entry"),
             ("Esc", "Return focus to the month grid"),
+        ],
+        Feature::Statistics => [
+            ("m", "Show mood ratings from the last 30 days"),
+            ("y", "Show mood ratings from the last 365 days"),
+            ("f", "Show all mood ratings through today"),
+            ("2", "Open Calendar to add or change ratings"),
+            ("1", "Open Identities"),
+            ("g", "Open GitHub sync settings"),
+            ("?", "Close this keyboard guide"),
+            ("q", "Quit"),
         ],
     };
     let mut lines = vec![Line::from("")];
@@ -1277,11 +1587,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                format!("{:<18}", "1 / 2"),
+                format!("{:<18}", "1 / 2 / 3"),
                 Style::default().fg(theme.accent),
             ),
             Span::styled(
-                "Switch Identities / Calendar",
+                "Switch Identities / Calendar / Statistics",
                 Style::default().fg(theme.foreground),
             ),
         ]),
@@ -1617,15 +1927,81 @@ mod tests {
                 text: "Submit report".into(),
                 done: false,
             });
+            app.document.calendar_day_mut(today).unwrap().mood =
+                Some(MoodRating::try_from(4).unwrap());
             terminal
                 .draw(|frame| render(frame, &mut app, &AppTheme::default()))
                 .unwrap();
             let output = rendered(&terminal);
-            assert!(output.contains("2 Calendar"));
+            assert!(output.contains(if width >= 90 { "2 Calendar" } else { "2 CAL" }));
             assert!(output.contains("August 2026"));
             assert!(output.contains("Submit report"));
+            assert!(output.contains("4 Good"));
             assert!(output.contains("Mon"));
             assert!(output.contains("Sun"));
         }
+    }
+
+    #[test]
+    fn renders_mood_picker_and_statistics_periods() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let backend = TestBackend::new(100, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_at(Document::default(), today);
+        app.document.ensure_calendar_day(today).mood = Some(MoodRating::try_from(5).unwrap());
+        app.feature = Feature::Statistics;
+
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("3 Statistics"));
+        assert!(output.contains("Mood statistics"));
+        assert!(output.contains("5 Happy"));
+        assert!(output.contains("1 rated day"));
+
+        app.feature = Feature::Calendar;
+        app.mode = Mode::SelectingMood(MoodPicker {
+            date: today,
+            selected: MoodRating::try_from(2).unwrap(),
+        });
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("Rate this day"));
+        assert!(output.contains("2  Bad"));
+        assert!(output.contains("c clear"));
+    }
+
+    #[test]
+    fn month_tiles_show_entry_text_in_compact_rows() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+        let backend = TestBackend::new(70, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_at(Document::default(), today);
+        let day = app.document.ensure_calendar_day(today);
+        day.mood = Some(MoodRating::try_from(4).unwrap());
+        day.entries.extend([
+            Item {
+                text: "Walk dog".into(),
+                done: true,
+            },
+            Item {
+                text: "Read book".into(),
+                done: false,
+            },
+        ]);
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_month_grid(frame, area, &app, &AppTheme::default());
+            })
+            .unwrap();
+
+        let output = rendered(&terminal);
+        assert!(output.contains("4 Good"));
+        assert!(output.contains("Walk dog"));
     }
 }

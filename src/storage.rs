@@ -304,4 +304,19 @@ mod tests {
         ));
         assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
+
+    #[test]
+    fn invalid_mood_rating_is_not_overwritten() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data.toml");
+        let source = "version = 3\n\n[[calendar.days]]\ndate = \"2026-08-28\"\nmood = 6\n";
+        fs::write(&path, source).unwrap();
+        let store = Store::new(path.clone());
+
+        assert!(matches!(
+            store.load_or_create(),
+            Err(StorageError::Parse { .. })
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
+    }
 }

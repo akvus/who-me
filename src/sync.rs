@@ -977,7 +977,7 @@ fn command_error(output: &GitOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Calendar, DATA_VERSION, IdentityStatus, Item, Topic};
+    use crate::model::{Calendar, DATA_VERSION, IdentityStatus, Item, MoodRating, Topic};
     use chrono::NaiveDate;
     use tempfile::tempdir;
 
@@ -1002,6 +1002,7 @@ mod tests {
             text: "Submit report".into(),
             done: true,
         });
+        expected.calendar_day_mut(date).unwrap().mood = Some(MoodRating::try_from(4).unwrap());
 
         write_repository_document(temp.path(), &expected).unwrap();
 

@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-pub const DATA_VERSION: u32 = 2;
-pub const LEGACY_DATA_VERSION: u32 = 1;
+pub const DATA_VERSION: u32 = 3;
+pub const FIRST_SUPPORTED_DATA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
@@ -25,8 +25,51 @@ pub struct Calendar {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CalendarDay {
     pub date: NaiveDate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mood: Option<MoodRating>,
     #[serde(default)]
     pub entries: Vec<Item>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct MoodRating(u8);
+
+impl MoodRating {
+    pub const ALL: [Self; 5] = [Self(1), Self(2), Self(3), Self(4), Self(5)];
+    pub const NEUTRAL: Self = Self(3);
+
+    pub const fn value(self) -> u8 {
+        self.0
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self.0 {
+            1 => "Depressed",
+            2 => "Bad",
+            3 => "Neutral",
+            4 => "Good",
+            5 => "Happy",
+            _ => "Invalid",
+        }
+    }
+}
+
+impl TryFrom<u8> for MoodRating {
+    type Error = String;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        (1..=5)
+            .contains(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| format!("mood rating {value} is outside the supported range 1-5"))
+    }
+}
+
+impl From<MoodRating> for u8 {
+    fn from(value: MoodRating) -> Self {
+        value.value()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,7 +131,7 @@ impl Document {
     pub fn upgrade(&mut self) -> Result<bool, String> {
         match self.version {
             DATA_VERSION => Ok(false),
-            LEGACY_DATA_VERSION => {
+            FIRST_SUPPORTED_DATA_VERSION..DATA_VERSION => {
                 self.version = DATA_VERSION;
                 Ok(true)
             }
@@ -126,8 +169,11 @@ impl Document {
             if !dates.insert(day.date) {
                 return Err(format!("calendar date {} appears more than once", day.date));
             }
-            if day.entries.is_empty() {
-                return Err(format!("calendar date {} has no entries", day.date));
+            if day.entries.is_empty() && day.mood.is_none() {
+                return Err(format!(
+                    "calendar date {} has neither entries nor a mood",
+                    day.date
+                ));
             }
             for (entry_index, entry) in day.entries.iter().enumerate() {
                 if entry.text.trim().is_empty() {
@@ -156,6 +202,7 @@ impl Document {
         }
         self.calendar.days.push(CalendarDay {
             date,
+            mood: None,
             entries: Vec::new(),
         });
         self.calendar.days.sort_by_key(|day| day.date);
@@ -173,7 +220,7 @@ impl Document {
             .calendar
             .days
             .iter()
-            .position(|day| day.date == date && day.entries.is_empty())
+            .position(|day| day.date == date && day.entries.is_empty() && day.mood.is_none())
         {
             self.calendar.days.remove(index);
         }
@@ -223,6 +270,10 @@ mod tests {
         assert!(legacy.validate().is_ok());
         legacy.calendar.days.push(legacy.calendar.days[0].clone());
         assert!(legacy.validate().unwrap_err().contains("more than once"));
+
+        let mut version_two: Document = toml::from_str("version = 2\n").unwrap();
+        assert!(version_two.upgrade().unwrap());
+        assert_eq!(version_two.version, DATA_VERSION);
     }
 
     #[test]
@@ -231,15 +282,35 @@ mod tests {
         let mut document = Document::default();
         document.calendar.days.push(CalendarDay {
             date,
+            mood: None,
             entries: Vec::new(),
         });
-        assert!(document.validate().unwrap_err().contains("has no entries"));
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .contains("neither entries nor a mood")
+        );
 
         document.calendar.days[0].entries.push(Item {
             text: "  ".into(),
             done: false,
         });
         assert!(document.validate().unwrap_err().contains("is empty"));
+    }
+
+    #[test]
+    fn mood_ratings_round_trip_as_numbers_and_allow_entryless_days() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let mut document = Document::default();
+        document.ensure_calendar_day(date).mood = Some(MoodRating::try_from(5).unwrap());
+        assert!(document.validate().is_ok());
+
+        let source = toml::to_string(&document).unwrap();
+        assert!(source.contains("mood = 5"));
+        assert_eq!(toml::from_str::<Document>(&source).unwrap(), document);
+        assert!(MoodRating::try_from(0).is_err());
+        assert!(MoodRating::try_from(6).is_err());
     }
 
     #[test]
