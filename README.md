@@ -42,7 +42,7 @@ cargo run
 | `?` | Show the keyboard guide |
 | `q` | Quit |
 
-In Calendar, arrow keys move between days in the month grid or between entries in the selected day's checklist. Each month tile shows its mood and as many checklist entries as fit. Press `r` to rate the selected day from 1 (**Depressed**) through 5 (**Happy**); `c` clears a rating from the picker. `Tab` switches focus between the grid and checklist, `[` / `]` changes month, and `a`, `Enter`, `Space`, `d`, and `Ctrl` + `↑` / `↓` manage entries. The calendar opens on the current month each time the app starts.
+In Calendar, arrow keys move between days in the month grid or between entries in the selected day's checklist. The left and right arrows cross into the previous or next month at month boundaries. Each month tile shows its mood and as many checklist entries as fit. Press `r` to rate the selected day from 1 (**Depressed**) through 5 (**Happy**); `c` clears a rating from the picker. `Tab` switches focus between the grid and checklist, `[` / `]` changes month, and `a`, `Enter`, `Space`, `d`, and `Ctrl` + `↑` / `↓` manage entries. The calendar opens on the current month each time the app starts.
 
 Statistics summarizes rated days through today. Press `m` for the rolling last 30 days, `y` for the rolling last 365 days, or `f` for all recorded history. Each view shows the average rating and the count and percentage for every mood level.
 

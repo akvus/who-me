@@ -633,19 +633,19 @@ impl App {
                 HandleResult::default()
             }
             KeyCode::Up if self.calendar_focus == CalendarFocus::Grid => {
-                self.move_selected_date(-7);
+                self.move_selected_date(-7, false);
                 HandleResult::default()
             }
             KeyCode::Down if self.calendar_focus == CalendarFocus::Grid => {
-                self.move_selected_date(7);
+                self.move_selected_date(7, false);
                 HandleResult::default()
             }
             KeyCode::Left if self.calendar_focus == CalendarFocus::Grid => {
-                self.move_selected_date(-1);
+                self.move_selected_date(-1, true);
                 HandleResult::default()
             }
             KeyCode::Right if self.calendar_focus == CalendarFocus::Grid => {
-                self.move_selected_date(1);
+                self.move_selected_date(1, true);
                 HandleResult::default()
             }
             KeyCode::Up if self.calendar_focus == CalendarFocus::Entries => {
@@ -1059,7 +1059,7 @@ impl App {
         self.calendar_scroll = 0;
     }
 
-    fn move_selected_date(&mut self, offset: i64) {
+    fn move_selected_date(&mut self, offset: i64, cross_month_boundary: bool) {
         let candidate = if offset < 0 {
             self.selected_date
                 .checked_sub_days(Days::new(offset.unsigned_abs()))
@@ -1068,9 +1068,15 @@ impl App {
                 .checked_add_days(Days::new(offset as u64))
         };
         if let Some(candidate) = candidate
-            && candidate.year() == self.displayed_month.year()
-            && candidate.month() == self.displayed_month.month()
+            && (cross_month_boundary
+                || (candidate.year() == self.displayed_month.year()
+                    && candidate.month() == self.displayed_month.month()))
         {
+            if candidate.year() != self.displayed_month.year()
+                || candidate.month() != self.displayed_month.month()
+            {
+                self.displayed_month = candidate.with_day(1).expect("day one is always valid");
+            }
             self.selected_date = candidate;
             self.selected_calendar_entry = None;
             self.calendar_scroll = 0;
@@ -1438,13 +1444,27 @@ mod tests {
     }
 
     #[test]
-    fn calendar_navigation_stays_in_month_and_clamps_between_months() {
+    fn calendar_navigation_crosses_month_boundaries_and_month_switching_clamps() {
         let today = NaiveDate::from_ymd_opt(2025, 1, 31).unwrap();
         let mut app = App::new_at(Document::default(), today);
         app.feature = Feature::Calendar;
 
         app.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            app.displayed_month,
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap()
+        );
+        assert_eq!(
+            app.selected_date,
+            NaiveDate::from_ymd_opt(2025, 2, 1).unwrap()
+        );
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(
+            app.displayed_month,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap()
+        );
         assert_eq!(app.selected_date, today);
+
         app.handle_key(key(KeyCode::Char(']')));
         assert_eq!(
             app.displayed_month,
