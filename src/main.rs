@@ -206,9 +206,12 @@ fn run_tui(
                 handle_sync_action(action, &mut app, &config_store, &service, revision);
             }
             if outcome.quit {
-                if app.sync_repository.is_some() {
+                let quit_sync = quit_sync_plan(app.sync_repository.is_some(), &app.sync_status);
+                if matches!(quit_sync, QuitSyncPlan::StartAndWait) {
                     app.set_sync_status(SyncStatus::Syncing);
                     service.synchronize(app.document.clone(), revision);
+                }
+                if !matches!(quit_sync, QuitSyncPlan::Skip) {
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while Instant::now() < deadline {
                         process_sync_events(
@@ -262,6 +265,23 @@ fn run_tui(
 
 fn document_can_be_replaced(mode: &Mode) -> bool {
     matches!(mode, Mode::Normal | Mode::Settings(_) | Mode::Help)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuitSyncPlan {
+    Skip,
+    Wait,
+    StartAndWait,
+}
+
+fn quit_sync_plan(configured: bool, status: &SyncStatus) -> QuitSyncPlan {
+    if !configured || matches!(status, SyncStatus::Synced | SyncStatus::Conflict(_)) {
+        QuitSyncPlan::Skip
+    } else if matches!(status, SyncStatus::Connecting | SyncStatus::Syncing) {
+        QuitSyncPlan::Wait
+    } else {
+        QuitSyncPlan::StartAndWait
+    }
 }
 
 fn process_sync_events(
@@ -357,5 +377,33 @@ mod tests {
         assert_eq!(parse_args(["-V".into()]).unwrap(), Command::Version);
         assert!(parse_args(["--unknown".into()]).is_err());
         assert!(parse_args(["one".into(), "two".into()]).is_err());
+    }
+
+    #[test]
+    fn quitting_skips_redundant_sync_work() {
+        assert_eq!(
+            quit_sync_plan(true, &SyncStatus::Synced),
+            QuitSyncPlan::Skip
+        );
+        assert_eq!(
+            quit_sync_plan(true, &SyncStatus::Conflict("resolve me".into())),
+            QuitSyncPlan::Skip
+        );
+        assert_eq!(
+            quit_sync_plan(false, &SyncStatus::Pending),
+            QuitSyncPlan::Skip
+        );
+    }
+
+    #[test]
+    fn quitting_finishes_pending_sync_work() {
+        assert_eq!(
+            quit_sync_plan(true, &SyncStatus::Pending),
+            QuitSyncPlan::StartAndWait
+        );
+        assert_eq!(
+            quit_sync_plan(true, &SyncStatus::Syncing),
+            QuitSyncPlan::Wait
+        );
     }
 }
