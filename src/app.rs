@@ -175,6 +175,14 @@ impl App {
         }
     }
 
+    pub fn refresh_today(&mut self) {
+        self.update_today(Local::now().date_naive());
+    }
+
+    fn update_today(&mut self, today: NaiveDate) {
+        self.today = today;
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> HandleResult {
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         match mode {
@@ -1544,9 +1552,31 @@ mod tests {
         );
         assert!(app.document.calendar_day(date).unwrap().entries.is_empty());
 
+        app.handle_key(key(KeyCode::Char('3')));
+        let statistics = app.mood_statistics();
+        assert_eq!(statistics.counts, [0, 0, 0, 0, 1]);
+        assert_eq!(statistics.rated_days, 1);
+
+        app.handle_key(key(KeyCode::Char('2')));
         app.handle_key(key(KeyCode::Char('r')));
         assert!(app.handle_key(key(KeyCode::Char('c'))).changed);
         assert!(app.document.calendar_day(date).is_none());
+    }
+
+    #[test]
+    fn statistics_refresh_after_the_day_changes_while_running() {
+        let yesterday = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let today = yesterday.checked_add_days(Days::new(1)).unwrap();
+        let mut app = App::new_at(Document::default(), yesterday);
+        app.document.ensure_calendar_day(today).mood = Some(MoodRating::try_from(4).unwrap());
+
+        assert_eq!(app.mood_statistics().rated_days, 0);
+
+        app.update_today(today);
+
+        let statistics = app.mood_statistics();
+        assert_eq!(statistics.counts, [0, 0, 0, 1, 0]);
+        assert_eq!(statistics.rated_days, 1);
     }
 
     #[test]

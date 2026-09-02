@@ -122,6 +122,7 @@ fn run_tui(
         let mut last_periodic = Instant::now();
         let mut last_retry = Instant::now();
         loop {
+            app.refresh_today();
             process_sync_events(
                 &mut app,
                 &store,
