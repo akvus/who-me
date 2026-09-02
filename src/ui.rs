@@ -4,17 +4,20 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Offset, Position, Rect, Size},
     style::{Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Shadow, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Shadow, Table, Wrap,
+    },
 };
 use tui_scrollview::{ScrollView, ScrollViewState, ScrollbarVisibility};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{
-        App, CalendarFocus, DeleteTarget, EditKind, Editor, Feature, Mode, MoodPicker,
+        App, CalendarFocus, CharacteristicField, CharacteristicForm, DeleteTarget, EditKind,
+        Editor, Feature, JudgementField, JudgementFocus, JudgementForm, Mode, MoodPicker,
         SettingsState, StatisticsPeriod, StatusPicker, days_in_month,
     },
-    model::{IdentityStatus, MoodRating},
+    model::{IdentityStatus, MoodRating, Sentiment},
     sync::SyncStatus,
     theme::{AppTheme, TopicVisual},
 };
@@ -44,6 +47,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         Feature::Identities => render_dashboard(frame, sections[1], app, theme),
         Feature::Calendar => render_calendar(frame, sections[1], app, theme),
         Feature::Statistics => render_statistics(frame, sections[1], app, theme),
+        Feature::Judgements => render_judgements(frame, sections[1], app, theme),
     }
     render_footer(frame, sections[2], app, theme);
 
@@ -53,6 +57,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, theme: &AppTheme) {
         }
         Mode::SelectingStatus(picker) => render_status_picker(frame, area, *picker, theme),
         Mode::SelectingMood(picker) => render_mood_picker(frame, area, *picker, theme),
+        Mode::EditingJudgement(form) => render_judgement_form(frame, area, form, app, theme),
+        Mode::EditingCharacteristic(form) => {
+            render_characteristic_form(frame, area, form, app, theme)
+        }
         Mode::ConfirmDelete(target) => render_confirmation(frame, area, app, *target, theme),
         Mode::Settings(settings) => render_settings(frame, area, app, settings, theme),
         Mode::Help => render_help(frame, area, app, theme),
@@ -103,6 +111,17 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
                 }
             )
         }
+        Feature::Judgements => {
+            let count = app.document.judgements.len();
+            format!(
+                "{count} {}",
+                if count == 1 {
+                    "judgement"
+                } else {
+                    "judgements"
+                }
+            )
+        }
     };
     let sync = app.sync_status.label();
     let summary = format!("{sync} · {count}");
@@ -112,7 +131,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
     let [brand_area, count_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(count_width)]).areas(inner);
 
-    let compact_tabs = brand_area.width < 58;
+    let compact_tabs = brand_area.width < 76;
     let mut brand = vec![
         Span::styled(
             " WHO / ME ",
@@ -141,6 +160,16 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme)
                 "3 Statistics"
             },
             app.feature == Feature::Statistics,
+            theme,
+        ),
+        Span::raw(" "),
+        feature_tab(
+            if compact_tabs {
+                "4 JUDGE"
+            } else {
+                "4 Judgements"
+            },
+            app.feature == Feature::Judgements,
             theme,
         ),
     ];
@@ -674,6 +703,423 @@ fn mood_average_color(average: f64, theme: &AppTheme) -> ratatui::style::Color {
     )
 }
 
+fn render_judgements(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
+    if area.width < 24 || area.height < 10 {
+        frame.render_widget(
+            Paragraph::new("Judgements needs a little more room")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted).bg(theme.background)),
+            area,
+        );
+        return;
+    }
+    if app.document.judgements.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "Compare what you expected with what you learned",
+                    Style::default()
+                        .fg(theme.bright_foreground)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Press n to create your first judgement",
+                    Style::default().fg(theme.muted),
+                )),
+            ])
+            .alignment(Alignment::Center)
+            .block(Block::default().padding(Padding::top(area.height.saturating_sub(3) / 2)))
+            .style(Style::default().bg(theme.background)),
+            area,
+        );
+        app.judgement_scroll = 0;
+        app.characteristic_scroll = 0;
+        return;
+    }
+
+    let outer = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    if area.width >= 100 {
+        let [list_area, detail_area] = Layout::horizontal([
+            Constraint::Length((outer.width / 4).clamp(24, 34)),
+            Constraint::Min(50),
+        ])
+        .spacing(1)
+        .areas(outer);
+        render_judgement_list(frame, list_area, app, theme);
+        let [summary_area, table_area] =
+            Layout::vertical([Constraint::Length(7), Constraint::Min(4)])
+                .spacing(1)
+                .areas(detail_area);
+        render_judgement_summary(frame, summary_area, app, theme);
+        render_characteristic_table(frame, table_area, app, theme);
+    } else {
+        let list_height = (outer.height / 4).clamp(4, 7);
+        let [list_area, detail_area] =
+            Layout::vertical([Constraint::Length(list_height), Constraint::Min(5)])
+                .spacing(1)
+                .areas(outer);
+        render_judgement_list(frame, list_area, app, theme);
+        let summary_height = detail_area.height.min(7);
+        let [summary_area, characteristic_area] =
+            Layout::vertical([Constraint::Length(summary_height), Constraint::Min(0)])
+                .areas(detail_area);
+        render_judgement_summary(frame, summary_area, app, theme);
+        render_characteristic_stack(frame, characteristic_area, app, theme);
+    }
+}
+
+fn render_judgement_list(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
+    let focused = app.judgement_focus == JudgementFocus::Judgements;
+    let block = Block::default()
+        .title(" Judgements ")
+        .title_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .padding(Padding::horizontal(1))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let visible = inner.height as usize;
+    if app.selected_judgement < app.judgement_scroll as usize {
+        app.judgement_scroll = app.selected_judgement as u16;
+    } else if app.selected_judgement >= app.judgement_scroll as usize + visible {
+        app.judgement_scroll = app
+            .selected_judgement
+            .saturating_add(1)
+            .saturating_sub(visible) as u16;
+    }
+    app.judgement_scroll = app
+        .judgement_scroll
+        .min(app.document.judgements.len().saturating_sub(visible) as u16);
+    let lines = app
+        .document
+        .judgements
+        .iter()
+        .enumerate()
+        .skip(app.judgement_scroll as usize)
+        .take(visible)
+        .map(|(index, judgement)| {
+            let selected = index == app.selected_judgement;
+            let background = if selected {
+                theme.selection
+            } else {
+                theme.panel
+            };
+            Line::from(vec![
+                Span::styled(
+                    if selected { "› " } else { "  " },
+                    Style::default().fg(theme.accent).bg(background),
+                ),
+                Span::styled(
+                    pad_to_width(
+                        &truncate_to_width(&judgement.name, inner.width.saturating_sub(2) as usize),
+                        inner.width.saturating_sub(2) as usize,
+                    ),
+                    Style::default()
+                        .fg(if selected {
+                            theme.bright_foreground
+                        } else {
+                            theme.foreground
+                        })
+                        .bg(background)
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
+fn render_judgement_summary(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
+    let Some(judgement) = app.selected_judgement() else {
+        return;
+    };
+    let statistics = app.judgement_statistics();
+    let block = Block::default()
+        .title(format!(" {} ", judgement.name))
+        .title_style(
+            Style::default()
+                .fg(theme.bright_foreground)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.muted))
+        .padding(Padding::horizontal(1))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let context = if judgement.follow_up.is_empty() {
+        "Follow-up not specified"
+    } else {
+        judgement.follow_up.as_str()
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            truncate_to_width(context, inner.width as usize),
+            Style::default().fg(theme.muted),
+        )),
+        sentiment_distribution_line(
+            "Before",
+            statistics.before_counts,
+            statistics.characteristics,
+            theme,
+        ),
+        sentiment_distribution_line(
+            "After ",
+            statistics.after_counts,
+            statistics.verified,
+            theme,
+        ),
+        Line::from(Span::styled(
+            format!(
+                "{} of {} verified",
+                statistics.verified, statistics.characteristics
+            ),
+            Style::default().fg(theme.dark_foreground),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn sentiment_distribution_line(
+    label: &str,
+    counts: [usize; 3],
+    total: usize,
+    theme: &AppTheme,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{label}  "),
+        Style::default().fg(theme.foreground),
+    )];
+    for (index, sentiment) in Sentiment::ALL.into_iter().enumerate() {
+        let count = counts[index];
+        let percentage = (total > 0).then(|| count * 100 / total);
+        spans.push(Span::styled(
+            match percentage {
+                Some(percentage) => {
+                    format!(
+                        "{} {} {count} ({percentage}%)  ",
+                        sentiment.symbol(),
+                        sentiment.label()
+                    )
+                }
+                None => format!("{} {} 0 (—)  ", sentiment.symbol(), sentiment.label()),
+            },
+            Style::default().fg(sentiment_color(sentiment, theme)),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn render_characteristic_table(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
+    let focused = app.judgement_focus == JudgementFocus::Characteristics;
+    let count = app
+        .selected_judgement()
+        .map_or(0, |judgement| judgement.characteristics.len());
+    let block = Block::default()
+        .title(format!(" Characteristics · {count} "))
+        .title_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if count == 0 {
+        frame.render_widget(
+            Paragraph::new("No characteristics yet · press a to add one")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted).bg(theme.panel)),
+            inner,
+        );
+        app.characteristic_scroll = 0;
+        return;
+    }
+    let visible = inner.height.saturating_sub(1) as usize;
+    let selected = app.selected_characteristic.unwrap_or(0).min(count - 1);
+    if selected < app.characteristic_scroll as usize {
+        app.characteristic_scroll = selected as u16;
+    } else if selected >= app.characteristic_scroll as usize + visible {
+        app.characteristic_scroll = selected.saturating_add(1).saturating_sub(visible) as u16;
+    }
+    app.characteristic_scroll = app
+        .characteristic_scroll
+        .min(count.saturating_sub(visible) as u16);
+    let judgement = &app.document.judgements[app.selected_judgement];
+    let rows = judgement
+        .characteristics
+        .iter()
+        .enumerate()
+        .skip(app.characteristic_scroll as usize)
+        .take(visible)
+        .map(|(index, characteristic)| {
+            let selected = index == selected;
+            let background = if selected {
+                theme.selection
+            } else {
+                theme.panel
+            };
+            let after_text = characteristic
+                .after
+                .as_ref()
+                .map_or("Not verified", |after| after.text.as_str());
+            let after_rating = characteristic
+                .after
+                .as_ref()
+                .map(|after| after.rating.label())
+                .unwrap_or("—");
+            Row::new(vec![
+                Cell::from(format!(
+                    "{}{}",
+                    if selected { "› " } else { "  " },
+                    characteristic.name
+                )),
+                Cell::from(characteristic.before.text.as_str()),
+                Cell::from(characteristic.before.rating.label()).style(
+                    Style::default()
+                        .fg(sentiment_color(characteristic.before.rating, theme))
+                        .bg(background),
+                ),
+                Cell::from(after_text),
+                Cell::from(after_rating).style(
+                    Style::default()
+                        .fg(characteristic
+                            .after
+                            .as_ref()
+                            .map_or(theme.muted, |after| sentiment_color(after.rating, theme)))
+                        .bg(background),
+                ),
+            ])
+            .style(Style::default().fg(theme.foreground).bg(background))
+        });
+    let header = Row::new(["Characteristic", "Before", "Rating", "After", "Rating"])
+        .style(
+            Style::default()
+                .fg(theme.accent)
+                .bg(theme.panel)
+                .add_modifier(Modifier::BOLD),
+        )
+        .bottom_margin(0);
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Percentage(18),
+                Constraint::Percentage(27),
+                Constraint::Length(10),
+                Constraint::Percentage(27),
+                Constraint::Length(10),
+            ],
+        )
+        .header(header)
+        .column_spacing(1)
+        .style(Style::default().bg(theme.panel)),
+        inner,
+    );
+}
+
+fn render_characteristic_stack(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
+    if area.is_empty() {
+        return;
+    }
+    let count = app
+        .selected_judgement()
+        .map_or(0, |judgement| judgement.characteristics.len());
+    let focused = app.judgement_focus == JudgementFocus::Characteristics;
+    let title = app.selected_characteristic.map_or_else(
+        || format!(" Characteristics · {count} "),
+        |selected| format!(" Characteristic {}/{} ", selected + 1, count),
+    );
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if focused { theme.accent } else { theme.muted }))
+        .padding(Padding::horizontal(1))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(characteristic) = app.selected_characteristic() else {
+        frame.render_widget(
+            Paragraph::new("No characteristics yet · press a to add one")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(theme.muted).bg(theme.panel)),
+            inner,
+        );
+        return;
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            characteristic.name.clone(),
+            Style::default()
+                .fg(theme.bright_foreground)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Before  ", Style::default().fg(theme.accent)),
+            Span::styled(
+                characteristic.before.rating.label(),
+                Style::default().fg(sentiment_color(characteristic.before.rating, theme)),
+            ),
+        ]),
+        Line::from(characteristic.before.text.clone()),
+        Line::from(""),
+    ];
+    if let Some(after) = &characteristic.after {
+        lines.extend([
+            Line::from(vec![
+                Span::styled("After   ", Style::default().fg(theme.accent)),
+                Span::styled(
+                    after.rating.label(),
+                    Style::default().fg(sentiment_color(after.rating, theme)),
+                ),
+            ]),
+            Line::from(after.text.clone()),
+        ]);
+    } else {
+        lines.push(Line::from(Span::styled(
+            "After   Not verified · press v",
+            Style::default().fg(theme.muted),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(theme.panel))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn sentiment_color(sentiment: Sentiment, theme: &AppTheme) -> ratatui::style::Color {
+    match sentiment {
+        Sentiment::Positive => theme.green,
+        Sentiment::Neutral => theme.muted,
+        Sentiment::Negative => theme.red,
+    }
+}
+
 fn render_dashboard(frame: &mut Frame<'_>, area: Rect, app: &mut App, theme: &AppTheme) {
     if area.width < 8 || area.height < 2 {
         return;
@@ -1177,6 +1623,13 @@ fn footer_hints(app: &App, width: u16) -> &'static str {
         (Mode::Normal, Feature::Statistics) => {
             "m 30 days  y 365 days  f forever  2 calendar  ? help  q quit"
         }
+        (Mode::Normal, Feature::Judgements) if width >= 95 => {
+            "↑↓ navigate  Tab focus  n new  a add characteristic  v verify  ↵ edit  d delete  Ctrl+↑↓ reorder"
+        }
+        (Mode::Normal, Feature::Judgements) if width >= 60 => {
+            "↑↓ navigate  Tab focus  n new  a add  v verify  ↵ edit  d delete"
+        }
+        (Mode::Normal, Feature::Judgements) => "n new  a add  v verify  1–4 switch  ? help",
         (Mode::Normal, Feature::Identities) if width >= 105 => {
             "↑↓ rows  ←→ identities  t new  a add  s status  ↵ edit  Space check  / search  2 calendar"
         }
@@ -1191,6 +1644,10 @@ fn footer_hints(app: &App, width: u16) -> &'static str {
         (Mode::Searching(_), _) => "type to filter  ↵ keep  Esc clear",
         (Mode::SelectingStatus(_), _) => "↑↓ choose  ↵ save  Esc cancel",
         (Mode::SelectingMood(_), _) => "1–5 save  ↑↓ choose  c clear  Esc cancel",
+        (Mode::EditingJudgement(_), _) => "Tab fields  ↵ save  Esc cancel",
+        (Mode::EditingCharacteristic(_), _) => {
+            "Tab fields  +/0/- rate  Ctrl+x clear after  ↵ save  Esc cancel"
+        }
         (Mode::ConfirmDelete(_), _) => "↵ / y confirm  Esc / n cancel",
         (Mode::Settings(settings), _) if settings.editing => "↵ connect  Esc cancel  ←→ cursor",
         (Mode::Settings(_), _) => "e edit  r sync  x disconnect  g / Esc close",
@@ -1438,6 +1895,236 @@ fn render_mood_picker(frame: &mut Frame<'_>, area: Rect, picker: MoodPicker, the
     );
 }
 
+fn render_judgement_form(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &JudgementForm,
+    app: &App,
+    theme: &AppTheme,
+) {
+    let popup = centered_rect(area, 76, 11);
+    frame.render_widget(Clear, popup);
+    let title = if form.target.is_some() {
+        " Edit judgement "
+    } else {
+        " New judgement "
+    };
+    let block = overlay_block(title, theme.accent, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let width = inner.width.saturating_sub(1) as usize;
+    let name_editor = Editor {
+        kind: EditKind::Search,
+        input: form.name.clone(),
+        cursor: form.name_cursor,
+    };
+    let follow_up_editor = Editor {
+        kind: EditKind::Search,
+        input: form.follow_up.clone(),
+        cursor: form.follow_up_cursor,
+    };
+    let (name, name_cursor) = visible_input(&name_editor, width);
+    let (follow_up, follow_up_cursor) = visible_input(&follow_up_editor, width);
+    let field_style = |selected| {
+        Style::default()
+            .fg(theme.bright_foreground)
+            .bg(if selected {
+                theme.selection
+            } else {
+                theme.dark_background
+            })
+    };
+    let lines = vec![
+        Line::from(Span::styled("Name", Style::default().fg(theme.accent))),
+        Line::from(Span::styled(
+            pad_to_width(&name, inner.width as usize),
+            field_style(form.field == JudgementField::Name),
+        )),
+        Line::from(Span::styled(
+            "Follow-up context (optional)",
+            Style::default().fg(theme.accent),
+        )),
+        Line::from(Span::styled(
+            pad_to_width(&follow_up, inner.width as usize),
+            field_style(form.field == JudgementField::FollowUp),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab switch field · Enter save · Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(Span::styled(
+            app.status.as_deref().unwrap_or(""),
+            Style::default().fg(theme.red),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+    let (cursor, row) = match form.field {
+        JudgementField::Name => (name_cursor, 1),
+        JudgementField::FollowUp => (follow_up_cursor, 3),
+    };
+    frame.set_cursor_position(Position::new(
+        inner.x.saturating_add(cursor as u16),
+        inner.y.saturating_add(row),
+    ));
+}
+
+fn render_characteristic_form(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &CharacteristicForm,
+    app: &App,
+    theme: &AppTheme,
+) {
+    let popup = centered_rect(area, 84, 18);
+    frame.render_widget(Clear, popup);
+    let title = if form.target.is_some() {
+        " Edit characteristic "
+    } else {
+        " New characteristic "
+    };
+    let block = overlay_block(title, theme.accent, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let width = inner.width.saturating_sub(1) as usize;
+    let editors = [
+        Editor {
+            kind: EditKind::Search,
+            input: form.name.clone(),
+            cursor: form.name_cursor,
+        },
+        Editor {
+            kind: EditKind::Search,
+            input: form.before_text.clone(),
+            cursor: form.before_cursor,
+        },
+        Editor {
+            kind: EditKind::Search,
+            input: form.after_text.clone(),
+            cursor: form.after_cursor,
+        },
+    ];
+    let [
+        (name, name_cursor),
+        (before, before_cursor),
+        (after, after_cursor),
+    ] = editors.map(|editor| visible_input(&editor, width));
+    let input_style = |selected| {
+        Style::default()
+            .fg(theme.bright_foreground)
+            .bg(if selected {
+                theme.selection
+            } else {
+                theme.dark_background
+            })
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            "Characteristic",
+            Style::default().fg(theme.accent),
+        )),
+        Line::from(Span::styled(
+            pad_to_width(&name, inner.width as usize),
+            input_style(form.field == CharacteristicField::Name),
+        )),
+        Line::from(Span::styled(
+            "Before text",
+            Style::default().fg(theme.accent),
+        )),
+        Line::from(Span::styled(
+            pad_to_width(&before, inner.width as usize),
+            input_style(form.field == CharacteristicField::BeforeText),
+        )),
+        sentiment_picker_line(
+            "Before rating",
+            form.before_rating,
+            form.field == CharacteristicField::BeforeRating,
+            theme,
+        ),
+        Line::from(""),
+        Line::from(Span::styled(
+            "After text (optional until verified)",
+            Style::default().fg(theme.accent),
+        )),
+        Line::from(Span::styled(
+            pad_to_width(&after, inner.width as usize),
+            input_style(form.field == CharacteristicField::AfterText),
+        )),
+        sentiment_picker_line(
+            "After rating ",
+            form.after_rating,
+            form.field == CharacteristicField::AfterRating,
+            theme,
+        ),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab fields · +/0/- rate · Ctrl+x clear after · Enter save · Esc cancel",
+            Style::default().fg(theme.muted),
+        )),
+        Line::from(Span::styled(
+            app.status.as_deref().unwrap_or(""),
+            Style::default().fg(theme.red),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.panel)),
+        inner,
+    );
+    let cursor = match form.field {
+        CharacteristicField::Name => Some((name_cursor, 1)),
+        CharacteristicField::BeforeText => Some((before_cursor, 3)),
+        CharacteristicField::AfterText => Some((after_cursor, 7)),
+        CharacteristicField::BeforeRating | CharacteristicField::AfterRating => None,
+    };
+    if let Some((column, row)) = cursor {
+        frame.set_cursor_position(Position::new(
+            inner.x.saturating_add(column as u16),
+            inner.y.saturating_add(row),
+        ));
+    }
+}
+
+fn sentiment_picker_line(
+    label: &str,
+    selected: Sentiment,
+    focused: bool,
+    theme: &AppTheme,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{label}  "),
+        Style::default().fg(theme.accent),
+    )];
+    for sentiment in Sentiment::ALL {
+        let active = sentiment == selected;
+        spans.push(Span::styled(
+            format!(" {} {} ", sentiment.symbol(), sentiment.label()),
+            Style::default()
+                .fg(if active {
+                    theme.background
+                } else {
+                    sentiment_color(sentiment, theme)
+                })
+                .bg(if active {
+                    sentiment_color(sentiment, theme)
+                } else if focused {
+                    theme.selection
+                } else {
+                    theme.panel
+                })
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
+
 fn render_editor(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1515,6 +2202,24 @@ fn render_confirmation(
             .and_then(|day| day.entries.get(entry))
             .map(|entry| format!("Delete {:?} from {}?", entry.text, date))
             .unwrap_or_else(|| "Delete this calendar entry?".into()),
+        DeleteTarget::Judgement(judgement) => app
+            .document
+            .judgements
+            .get(judgement)
+            .map(|judgement| {
+                format!(
+                    "Delete judgement {:?} and all of its characteristics?",
+                    judgement.name
+                )
+            })
+            .unwrap_or_else(|| "Delete this judgement?".into()),
+        DeleteTarget::Characteristic(judgement, characteristic) => app
+            .document
+            .judgements
+            .get(judgement)
+            .and_then(|judgement| judgement.characteristics.get(characteristic))
+            .map(|characteristic| format!("Delete characteristic {:?}?", characteristic.name))
+            .unwrap_or_else(|| "Delete this characteristic?".into()),
     };
     let block = overlay_block(" Confirm deletion ", theme.red, theme);
     frame.render_widget(
@@ -1575,6 +2280,16 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
             ("?", "Close this keyboard guide"),
             ("q", "Quit"),
         ],
+        Feature::Judgements => [
+            ("↑ / ↓", "Navigate the focused list"),
+            ("Tab", "Switch between judgements and characteristics"),
+            ("n / a", "Add a judgement / characteristic"),
+            ("v", "Add or update the selected after observation"),
+            ("Enter", "Edit the focused judgement or characteristic"),
+            ("d", "Delete with confirmation"),
+            ("Ctrl + ↑ / ↓", "Reorder the focused list"),
+            ("Esc", "Return focus to judgements"),
+        ],
     };
     let mut lines = vec![Line::from("")];
     for (key, description) in rows {
@@ -1587,11 +2302,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, theme: &AppTheme) {
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                format!("{:<18}", "1 / 2 / 3"),
+                format!("{:<18}", "1 / 2 / 3 / 4"),
                 Style::default().fg(theme.accent),
             ),
             Span::styled(
-                "Switch Identities / Calendar / Statistics",
+                "Switch Identities / Calendar / Statistics / Judgements",
                 Style::default().fg(theme.foreground),
             ),
         ]),
@@ -1760,7 +2475,10 @@ fn display_width(value: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Calendar, DATA_VERSION, Document, IdentityStatus, Item, Topic};
+    use crate::model::{
+        Calendar, Characteristic, DATA_VERSION, Document, IdentityStatus, Item, Judgement,
+        Observation, Sentiment, Topic,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     fn sample_app() -> App {
@@ -1804,6 +2522,7 @@ mod tests {
                 },
             ],
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         })
     }
 
@@ -1972,6 +2691,113 @@ mod tests {
         assert!(output.contains("Rate this day"));
         assert!(output.contains("2  Bad"));
         assert!(output.contains("c clear"));
+    }
+
+    #[test]
+    fn renders_judgements_as_a_table_and_a_narrow_stack() {
+        for (width, height) in [(120, 30), (72, 30)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new(Document::default());
+            app.feature = Feature::Judgements;
+            app.document.judgements.push(Judgement {
+                name: "New role".into(),
+                follow_up: "After one year".into(),
+                characteristics: vec![
+                    Characteristic {
+                        name: "Autonomy".into(),
+                        before: Observation {
+                            text: "Expected freedom".into(),
+                            rating: Sentiment::Positive,
+                        },
+                        after: Some(Observation {
+                            text: "Some constraints".into(),
+                            rating: Sentiment::Negative,
+                        }),
+                    },
+                    Characteristic {
+                        name: "Learning".into(),
+                        before: Observation {
+                            text: "Expected growth".into(),
+                            rating: Sentiment::Positive,
+                        },
+                        after: None,
+                    },
+                ],
+            });
+            app.selected_characteristic = Some(0);
+            app.judgement_focus = JudgementFocus::Characteristics;
+
+            terminal
+                .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+                .unwrap();
+            let output = rendered(&terminal);
+            assert!(output.contains(if width >= 100 {
+                "4 Judgements"
+            } else {
+                "4 JUDGE"
+            }));
+            assert!(output.contains("New role"));
+            assert!(output.contains("After one year"));
+            assert!(output.contains("Autonomy"));
+            assert!(output.contains("Expected freedom"));
+            assert!(output.contains("Some constraints"));
+            assert!(output.contains("1 of 2 verified"));
+            if width >= 100 {
+                assert!(output.contains("Not verified"));
+            } else {
+                assert!(output.contains("Characteristic 1/2"));
+            }
+        }
+    }
+
+    #[test]
+    fn renders_judgement_forms_and_empty_state() {
+        let backend = TestBackend::new(90, 28);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(Document::default());
+        app.feature = Feature::Judgements;
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        assert!(rendered(&terminal).contains("first judgement"));
+
+        app.mode = Mode::EditingJudgement(JudgementForm {
+            target: None,
+            name: "Laptop".into(),
+            name_cursor: 6,
+            follow_up: "After research".into(),
+            follow_up_cursor: 14,
+            field: JudgementField::FollowUp,
+        });
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("New judgement"));
+        assert!(output.contains("After research"));
+
+        app.mode = Mode::EditingCharacteristic(CharacteristicForm {
+            judgement: 0,
+            target: None,
+            name: "Battery".into(),
+            name_cursor: 7,
+            before_text: "Expected all day".into(),
+            before_cursor: 16,
+            before_rating: Sentiment::Positive,
+            after_text: String::new(),
+            after_cursor: 0,
+            after_rating: Sentiment::Neutral,
+            has_after: false,
+            field: CharacteristicField::BeforeRating,
+        });
+        terminal
+            .draw(|frame| render(frame, &mut app, &AppTheme::default()))
+            .unwrap();
+        let output = rendered(&terminal);
+        assert!(output.contains("New characteristic"));
+        assert!(output.contains("Expected all day"));
+        assert!(output.contains("Positive"));
     }
 
     #[test]

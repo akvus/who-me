@@ -208,6 +208,7 @@ mod tests {
                 }],
             }],
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         }
     }
 
@@ -310,6 +311,32 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("data.toml");
         let source = "version = 3\n\n[[calendar.days]]\ndate = \"2026-08-28\"\nmood = 6\n";
+        fs::write(&path, source).unwrap();
+        let store = Store::new(path.clone());
+
+        assert!(matches!(
+            store.load_or_create(),
+            Err(StorageError::Parse { .. })
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn invalid_judgement_rating_is_not_overwritten() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("data.toml");
+        let source = r#"version = 4
+
+[[judgements]]
+name = "Laptop"
+
+[[judgements.characteristics]]
+name = "Battery"
+
+[judgements.characteristics.before]
+text = "Expected all day"
+rating = "mixed"
+"#;
         fs::write(&path, source).unwrap();
         let store = Store::new(path.clone());
 

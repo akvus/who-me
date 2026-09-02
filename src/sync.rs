@@ -977,7 +977,10 @@ fn command_error(output: &GitOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Calendar, DATA_VERSION, IdentityStatus, Item, MoodRating, Topic};
+    use crate::model::{
+        Calendar, Characteristic, DATA_VERSION, IdentityStatus, Item, Judgement, MoodRating,
+        Observation, Sentiment, Topic,
+    };
     use chrono::NaiveDate;
     use tempfile::tempdir;
 
@@ -990,11 +993,12 @@ mod tests {
                 items: Vec::new(),
             }],
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         }
     }
 
     #[test]
-    fn repository_document_round_trips_calendar_entries() {
+    fn repository_document_round_trips_all_feature_data() {
         let temp = tempdir().unwrap();
         let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
         let mut expected = document("Developer");
@@ -1003,6 +1007,21 @@ mod tests {
             done: true,
         });
         expected.calendar_day_mut(date).unwrap().mood = Some(MoodRating::try_from(4).unwrap());
+        expected.judgements.push(Judgement {
+            name: "New role".into(),
+            follow_up: "After one year".into(),
+            characteristics: vec![Characteristic {
+                name: "Autonomy".into(),
+                before: Observation {
+                    text: "Expected freedom".into(),
+                    rating: Sentiment::Positive,
+                },
+                after: Some(Observation {
+                    text: "Some constraints".into(),
+                    rating: Sentiment::Negative,
+                }),
+            }],
+        });
 
         write_repository_document(temp.path(), &expected).unwrap();
 
@@ -1303,6 +1322,7 @@ mod tests {
                 },
             ],
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         };
         let remote = seeded_remote(temp.path(), &base);
         let paths = SyncPaths::in_directory(&temp.path().join("client"));

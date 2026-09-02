@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-pub const DATA_VERSION: u32 = 3;
+pub const DATA_VERSION: u32 = 4;
 pub const FIRST_SUPPORTED_DATA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +14,60 @@ pub struct Document {
     pub topics: Vec<Topic>,
     #[serde(default)]
     pub calendar: Calendar,
+    #[serde(default)]
+    pub judgements: Vec<Judgement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Judgement {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub follow_up: String,
+    #[serde(default)]
+    pub characteristics: Vec<Characteristic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Characteristic {
+    pub name: String,
+    pub before: Observation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Observation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Observation {
+    pub text: String,
+    pub rating: Sentiment,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sentiment {
+    Positive,
+    #[default]
+    Neutral,
+    Negative,
+}
+
+impl Sentiment {
+    pub const ALL: [Self; 3] = [Self::Positive, Self::Neutral, Self::Negative];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Positive => "Positive",
+            Self::Neutral => "Neutral",
+            Self::Negative => "Negative",
+        }
+    }
+
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Positive => "+",
+            Self::Neutral => "0",
+            Self::Negative => "−",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,13 +173,14 @@ impl Default for Document {
             version: DATA_VERSION,
             topics: Vec::new(),
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         }
     }
 }
 
 impl Document {
     pub fn is_empty(&self) -> bool {
-        self.topics.is_empty() && self.calendar.days.is_empty()
+        self.topics.is_empty() && self.calendar.days.is_empty() && self.judgements.is_empty()
     }
 
     pub fn upgrade(&mut self) -> Result<bool, String> {
@@ -181,6 +236,42 @@ impl Document {
                         "entry {} on calendar date {} is empty",
                         entry_index + 1,
                         day.date
+                    ));
+                }
+            }
+        }
+
+        for (judgement_index, judgement) in self.judgements.iter().enumerate() {
+            if judgement.name.trim().is_empty() {
+                return Err(format!(
+                    "judgement {} has an empty name",
+                    judgement_index + 1
+                ));
+            }
+            for (characteristic_index, characteristic) in
+                judgement.characteristics.iter().enumerate()
+            {
+                if characteristic.name.trim().is_empty() {
+                    return Err(format!(
+                        "characteristic {} in judgement {:?} has an empty name",
+                        characteristic_index + 1,
+                        judgement.name
+                    ));
+                }
+                if characteristic.before.text.trim().is_empty() {
+                    return Err(format!(
+                        "before observation for characteristic {:?} in judgement {:?} is empty",
+                        characteristic.name, judgement.name
+                    ));
+                }
+                if characteristic
+                    .after
+                    .as_ref()
+                    .is_some_and(|observation| observation.text.trim().is_empty())
+                {
+                    return Err(format!(
+                        "after observation for characteristic {:?} in judgement {:?} is empty",
+                        characteristic.name, judgement.name
                     ));
                 }
             }
@@ -244,6 +335,7 @@ mod tests {
             version: 99,
             topics: Vec::new(),
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         };
         assert!(document.validate().unwrap_err().contains("unsupported"));
 
@@ -274,6 +366,11 @@ mod tests {
         let mut version_two: Document = toml::from_str("version = 2\n").unwrap();
         assert!(version_two.upgrade().unwrap());
         assert_eq!(version_two.version, DATA_VERSION);
+
+        let mut version_three: Document = toml::from_str("version = 3\n").unwrap();
+        assert!(version_three.upgrade().unwrap());
+        assert_eq!(version_three.version, DATA_VERSION);
+        assert!(version_three.judgements.is_empty());
     }
 
     #[test]
@@ -334,5 +431,70 @@ name = "Developer"
             let restored: Document = toml::from_str(&serialized).unwrap();
             assert_eq!(restored.topics[0].status, status);
         }
+    }
+
+    #[test]
+    fn judgements_round_trip_complete_observations() {
+        let mut document = Document::default();
+        document.judgements.push(Judgement {
+            name: "New role".into(),
+            follow_up: "After one year".into(),
+            characteristics: vec![Characteristic {
+                name: "Autonomy".into(),
+                before: Observation {
+                    text: "Expected a lot of freedom".into(),
+                    rating: Sentiment::Positive,
+                },
+                after: Some(Observation {
+                    text: "Freedom came with constraints".into(),
+                    rating: Sentiment::Neutral,
+                }),
+            }],
+        });
+
+        assert!(document.validate().is_ok());
+        let source = toml::to_string_pretty(&document).unwrap();
+        assert!(source.contains("rating = \"positive\""));
+        assert!(source.contains("rating = \"neutral\""));
+        assert_eq!(toml::from_str::<Document>(&source).unwrap(), document);
+    }
+
+    #[test]
+    fn judgement_validation_rejects_blank_names_and_observations() {
+        let mut document = Document::default();
+        document.judgements.push(Judgement {
+            name: "  ".into(),
+            follow_up: String::new(),
+            characteristics: Vec::new(),
+        });
+        assert!(document.validate().unwrap_err().contains("judgement"));
+
+        document.judgements[0].name = "Laptop".into();
+        document.judgements[0].characteristics.push(Characteristic {
+            name: "Battery".into(),
+            before: Observation {
+                text: "  ".into(),
+                rating: Sentiment::Neutral,
+            },
+            after: None,
+        });
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .contains("before observation")
+        );
+
+        document.judgements[0].characteristics[0].before.text = "Expected all day".into();
+        document.judgements[0].characteristics[0].after = Some(Observation {
+            text: " ".into(),
+            rating: Sentiment::Negative,
+        });
+        assert!(
+            document
+                .validate()
+                .unwrap_err()
+                .contains("after observation")
+        );
     }
 }

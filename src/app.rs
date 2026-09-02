@@ -2,7 +2,10 @@ use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    model::{Document, IdentityStatus, Item, MoodRating, Topic},
+    model::{
+        Characteristic, Document, IdentityStatus, Item, Judgement, MoodRating, Observation,
+        Sentiment, Topic,
+    },
     sync::{ConflictChoice, SyncStatus, validate_github_url},
 };
 
@@ -13,6 +16,8 @@ pub enum Mode {
     Searching(Editor),
     SelectingStatus(StatusPicker),
     SelectingMood(MoodPicker),
+    EditingJudgement(JudgementForm),
+    EditingCharacteristic(CharacteristicForm),
     ConfirmDelete(DeleteTarget),
     Settings(SettingsState),
     Help,
@@ -38,6 +43,56 @@ pub struct MoodPicker {
     pub selected: MoodRating,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JudgementFocus {
+    #[default]
+    Judgements,
+    Characteristics,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JudgementField {
+    #[default]
+    Name,
+    FollowUp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JudgementForm {
+    pub target: Option<usize>,
+    pub name: String,
+    pub name_cursor: usize,
+    pub follow_up: String,
+    pub follow_up_cursor: usize,
+    pub field: JudgementField,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CharacteristicField {
+    #[default]
+    Name,
+    BeforeText,
+    BeforeRating,
+    AfterText,
+    AfterRating,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CharacteristicForm {
+    pub judgement: usize,
+    pub target: Option<usize>,
+    pub name: String,
+    pub name_cursor: usize,
+    pub before_text: String,
+    pub before_cursor: usize,
+    pub before_rating: Sentiment,
+    pub after_text: String,
+    pub after_cursor: usize,
+    pub after_rating: Sentiment,
+    pub has_after: bool,
+    pub field: CharacteristicField,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Editor {
     pub kind: EditKind,
@@ -61,6 +116,8 @@ pub enum DeleteTarget {
     Topic(usize),
     Item(usize, usize),
     CalendarEntry(NaiveDate, usize),
+    Judgement(usize),
+    Characteristic(usize, usize),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +126,7 @@ pub enum Feature {
     Identities,
     Calendar,
     Statistics,
+    Judgements,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -94,6 +152,14 @@ pub struct MoodStatistics {
     pub counts: [usize; 5],
     pub rated_days: usize,
     pub total: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JudgementStatistics {
+    pub before_counts: [usize; 3],
+    pub after_counts: [usize; 3],
+    pub characteristics: usize,
+    pub verified: usize,
 }
 
 impl MoodStatistics {
@@ -141,6 +207,11 @@ pub struct App {
     pub calendar_focus: CalendarFocus,
     pub calendar_scroll: u16,
     pub statistics_period: StatisticsPeriod,
+    pub selected_judgement: usize,
+    pub selected_characteristic: Option<usize>,
+    pub judgement_focus: JudgementFocus,
+    pub judgement_scroll: u16,
+    pub characteristic_scroll: u16,
     pub sync_status: SyncStatus,
     pub sync_repository: Option<String>,
     pub sync_branch: Option<String>,
@@ -169,6 +240,11 @@ impl App {
             calendar_focus: CalendarFocus::Grid,
             calendar_scroll: 0,
             statistics_period: StatisticsPeriod::Month,
+            selected_judgement: 0,
+            selected_characteristic: None,
+            judgement_focus: JudgementFocus::Judgements,
+            judgement_scroll: 0,
+            characteristic_scroll: 0,
             sync_status: SyncStatus::LocalOnly,
             sync_repository: None,
             sync_branch: None,
@@ -263,6 +339,10 @@ impl App {
                     HandleResult::default()
                 }
             },
+            Mode::EditingJudgement(mut form) => self.handle_judgement_form(key, &mut form),
+            Mode::EditingCharacteristic(mut form) => {
+                self.handle_characteristic_form(key, &mut form)
+            }
             Mode::ConfirmDelete(target) => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.delete(target);
@@ -355,6 +435,35 @@ impl App {
         statistics
     }
 
+    pub fn selected_judgement(&self) -> Option<&Judgement> {
+        self.document.judgements.get(self.selected_judgement)
+    }
+
+    pub fn selected_characteristic(&self) -> Option<&Characteristic> {
+        self.selected_characteristic.and_then(|characteristic| {
+            self.selected_judgement()
+                .and_then(|judgement| judgement.characteristics.get(characteristic))
+        })
+    }
+
+    pub fn judgement_statistics(&self) -> JudgementStatistics {
+        let Some(judgement) = self.selected_judgement() else {
+            return JudgementStatistics::default();
+        };
+        let mut statistics = JudgementStatistics {
+            characteristics: judgement.characteristics.len(),
+            ..JudgementStatistics::default()
+        };
+        for characteristic in &judgement.characteristics {
+            statistics.before_counts[sentiment_index(characteristic.before.rating)] += 1;
+            if let Some(after) = &characteristic.after {
+                statistics.after_counts[sentiment_index(after.rating)] += 1;
+                statistics.verified += 1;
+            }
+        }
+        statistics
+    }
+
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.status = Some(message.into());
     }
@@ -385,6 +494,7 @@ impl App {
         }
         self.ensure_visible_selection();
         self.ensure_calendar_selection();
+        self.ensure_judgement_selection();
         self.status = Some("Updated from GitHub".into());
     }
 
@@ -425,6 +535,10 @@ impl App {
                 self.feature = Feature::Statistics;
                 return HandleResult::default();
             }
+            KeyCode::Char('4') => {
+                self.feature = Feature::Judgements;
+                return HandleResult::default();
+            }
             _ => {}
         }
 
@@ -432,6 +546,7 @@ impl App {
             Feature::Identities => self.handle_identities(key),
             Feature::Calendar => self.handle_calendar(key),
             Feature::Statistics => self.handle_statistics(key),
+            Feature::Judgements => self.handle_judgements(key),
         }
     }
 
@@ -682,6 +797,188 @@ impl App {
         HandleResult::default()
     }
 
+    fn handle_judgements(&mut self, key: KeyEvent) -> HandleResult {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            let changed = match key.code {
+                KeyCode::Up => self.move_judgement_selection(-1),
+                KeyCode::Down => self.move_judgement_selection(1),
+                _ => false,
+            };
+            return HandleResult {
+                changed,
+                ..HandleResult::default()
+            };
+        }
+
+        match key.code {
+            KeyCode::Char('n') => {
+                self.mode = Mode::EditingJudgement(JudgementForm {
+                    target: None,
+                    name: String::new(),
+                    name_cursor: 0,
+                    follow_up: String::new(),
+                    follow_up_cursor: 0,
+                    field: JudgementField::Name,
+                });
+                HandleResult::default()
+            }
+            KeyCode::Char('a') if self.selected_judgement().is_some() => {
+                self.mode = Mode::EditingCharacteristic(CharacteristicForm {
+                    judgement: self.selected_judgement,
+                    target: None,
+                    name: String::new(),
+                    name_cursor: 0,
+                    before_text: String::new(),
+                    before_cursor: 0,
+                    before_rating: Sentiment::Neutral,
+                    after_text: String::new(),
+                    after_cursor: 0,
+                    after_rating: Sentiment::Neutral,
+                    has_after: false,
+                    field: CharacteristicField::Name,
+                });
+                HandleResult::default()
+            }
+            KeyCode::Char('v') if self.selected_characteristic().is_some() => {
+                self.open_characteristic_form(CharacteristicField::AfterText);
+                HandleResult::default()
+            }
+            KeyCode::Enter => {
+                match self.judgement_focus {
+                    JudgementFocus::Judgements => self.open_judgement_form(),
+                    JudgementFocus::Characteristics => {
+                        self.open_characteristic_form(CharacteristicField::Name)
+                    }
+                }
+                HandleResult::default()
+            }
+            KeyCode::Char('d') => {
+                let target = match self.judgement_focus {
+                    JudgementFocus::Judgements => self
+                        .selected_judgement()
+                        .map(|_| DeleteTarget::Judgement(self.selected_judgement)),
+                    JudgementFocus::Characteristics => self
+                        .selected_characteristic
+                        .map(|row| DeleteTarget::Characteristic(self.selected_judgement, row)),
+                };
+                if let Some(target) = target {
+                    self.mode = Mode::ConfirmDelete(target);
+                }
+                HandleResult::default()
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.judgement_focus = match self.judgement_focus {
+                    JudgementFocus::Judgements => JudgementFocus::Characteristics,
+                    JudgementFocus::Characteristics => JudgementFocus::Judgements,
+                };
+                if self.judgement_focus == JudgementFocus::Characteristics
+                    && self.selected_characteristic.is_none()
+                    && self
+                        .selected_judgement()
+                        .is_some_and(|judgement| !judgement.characteristics.is_empty())
+                {
+                    self.selected_characteristic = Some(0);
+                }
+                HandleResult::default()
+            }
+            KeyCode::Up => {
+                self.select_judgement_row(-1);
+                HandleResult::default()
+            }
+            KeyCode::Down => {
+                self.select_judgement_row(1);
+                HandleResult::default()
+            }
+            KeyCode::Esc => {
+                self.judgement_focus = JudgementFocus::Judgements;
+                HandleResult::default()
+            }
+            _ => HandleResult::default(),
+        }
+    }
+
+    fn handle_judgement_form(&mut self, key: KeyEvent, form: &mut JudgementForm) -> HandleResult {
+        match key.code {
+            KeyCode::Esc => return HandleResult::default(),
+            KeyCode::Tab | KeyCode::BackTab => {
+                form.field = match form.field {
+                    JudgementField::Name => JudgementField::FollowUp,
+                    JudgementField::FollowUp => JudgementField::Name,
+                };
+            }
+            KeyCode::Enter => {
+                let Some(changed) = self.commit_judgement_form(form) else {
+                    self.mode = Mode::EditingJudgement(form.clone());
+                    return HandleResult::default();
+                };
+                return HandleResult {
+                    changed,
+                    ..HandleResult::default()
+                };
+            }
+            _ => match form.field {
+                JudgementField::Name => edit_value(&mut form.name, &mut form.name_cursor, key),
+                JudgementField::FollowUp => {
+                    edit_value(&mut form.follow_up, &mut form.follow_up_cursor, key)
+                }
+            },
+        }
+        self.mode = Mode::EditingJudgement(form.clone());
+        HandleResult::default()
+    }
+
+    fn handle_characteristic_form(
+        &mut self,
+        key: KeyEvent,
+        form: &mut CharacteristicForm,
+    ) -> HandleResult {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x') {
+            form.after_text.clear();
+            form.after_cursor = 0;
+            form.after_rating = Sentiment::Neutral;
+            form.has_after = false;
+            self.mode = Mode::EditingCharacteristic(form.clone());
+            return HandleResult::default();
+        }
+        match key.code {
+            KeyCode::Esc => return HandleResult::default(),
+            KeyCode::Tab => form.field = next_characteristic_field(form.field, 1),
+            KeyCode::BackTab => form.field = next_characteristic_field(form.field, -1),
+            KeyCode::Enter => {
+                let Some(changed) = self.commit_characteristic_form(form) else {
+                    self.mode = Mode::EditingCharacteristic(form.clone());
+                    return HandleResult::default();
+                };
+                return HandleResult {
+                    changed,
+                    ..HandleResult::default()
+                };
+            }
+            _ => match form.field {
+                CharacteristicField::Name => edit_value(&mut form.name, &mut form.name_cursor, key),
+                CharacteristicField::BeforeText => {
+                    edit_value(&mut form.before_text, &mut form.before_cursor, key)
+                }
+                CharacteristicField::BeforeRating => {
+                    update_sentiment(&mut form.before_rating, key);
+                }
+                CharacteristicField::AfterText => {
+                    edit_value(&mut form.after_text, &mut form.after_cursor, key);
+                    if !form.after_text.is_empty() {
+                        form.has_after = true;
+                    }
+                }
+                CharacteristicField::AfterRating => {
+                    if update_sentiment(&mut form.after_rating, key) {
+                        form.has_after = true;
+                    }
+                }
+            },
+        }
+        self.mode = Mode::EditingCharacteristic(form.clone());
+        HandleResult::default()
+    }
+
     fn handle_settings(&mut self, key: KeyEvent, settings: &mut SettingsState) -> HandleResult {
         if settings.confirm_disconnect {
             match key.code {
@@ -825,6 +1122,118 @@ impl App {
         true
     }
 
+    fn open_judgement_form(&mut self) {
+        let Some(judgement) = self.selected_judgement() else {
+            return;
+        };
+        self.mode = Mode::EditingJudgement(JudgementForm {
+            target: Some(self.selected_judgement),
+            name: judgement.name.clone(),
+            name_cursor: judgement.name.chars().count(),
+            follow_up: judgement.follow_up.clone(),
+            follow_up_cursor: judgement.follow_up.chars().count(),
+            field: JudgementField::Name,
+        });
+    }
+
+    fn open_characteristic_form(&mut self, field: CharacteristicField) {
+        let Some(characteristic) = self.selected_characteristic() else {
+            return;
+        };
+        let after = characteristic.after.as_ref();
+        self.mode = Mode::EditingCharacteristic(CharacteristicForm {
+            judgement: self.selected_judgement,
+            target: self.selected_characteristic,
+            name: characteristic.name.clone(),
+            name_cursor: characteristic.name.chars().count(),
+            before_text: characteristic.before.text.clone(),
+            before_cursor: characteristic.before.text.chars().count(),
+            before_rating: characteristic.before.rating,
+            after_text: after.map(|value| value.text.clone()).unwrap_or_default(),
+            after_cursor: after.map_or(0, |value| value.text.chars().count()),
+            after_rating: after.map_or(Sentiment::Neutral, |value| value.rating),
+            has_after: after.is_some(),
+            field,
+        });
+    }
+
+    fn commit_judgement_form(&mut self, form: &JudgementForm) -> Option<bool> {
+        let name = form.name.trim();
+        if name.is_empty() {
+            self.status = Some("Judgement name cannot be empty".into());
+            return None;
+        }
+        let follow_up = form.follow_up.trim();
+        if let Some(target) = form.target {
+            let judgement = self.document.judgements.get_mut(target)?;
+            if judgement.name == name && judgement.follow_up == follow_up {
+                return Some(false);
+            }
+            judgement.name = name.into();
+            judgement.follow_up = follow_up.into();
+            self.selected_judgement = target;
+        } else {
+            self.document.judgements.push(Judgement {
+                name: name.into(),
+                follow_up: follow_up.into(),
+                characteristics: Vec::new(),
+            });
+            self.selected_judgement = self.document.judgements.len() - 1;
+            self.selected_characteristic = None;
+        }
+        self.status = Some("Judgement saved".into());
+        Some(true)
+    }
+
+    fn commit_characteristic_form(&mut self, form: &CharacteristicForm) -> Option<bool> {
+        let name = form.name.trim();
+        let before_text = form.before_text.trim();
+        if name.is_empty() {
+            self.status = Some("Characteristic name cannot be empty".into());
+            return None;
+        }
+        if before_text.is_empty() {
+            self.status = Some("Before text cannot be empty".into());
+            return None;
+        }
+        let after_text = form.after_text.trim();
+        if form.has_after && after_text.is_empty() {
+            self.status = Some("After text cannot be empty; Ctrl+x clears it".into());
+            return None;
+        }
+        let characteristic = Characteristic {
+            name: name.into(),
+            before: Observation {
+                text: before_text.into(),
+                rating: form.before_rating,
+            },
+            after: form.has_after.then(|| Observation {
+                text: after_text.into(),
+                rating: form.after_rating,
+            }),
+        };
+        let judgement = self.document.judgements.get_mut(form.judgement)?;
+        if let Some(target) = form.target {
+            let current = judgement.characteristics.get_mut(target)?;
+            if *current == characteristic {
+                return Some(false);
+            }
+            *current = characteristic;
+            self.selected_characteristic = Some(target);
+        } else {
+            judgement.characteristics.push(characteristic);
+            self.selected_characteristic = Some(judgement.characteristics.len() - 1);
+        }
+        self.selected_judgement = form.judgement;
+        self.judgement_focus = JudgementFocus::Characteristics;
+        self.status = Some(if form.has_after {
+            "Characteristic verified".into()
+        } else {
+            "Characteristic saved".into()
+        });
+        Some(true)
+    }
+
     fn commit_status(&mut self, picker: StatusPicker) -> HandleResult {
         let Some(topic) = self.document.topics.get_mut(picker.topic) else {
             return HandleResult::default();
@@ -937,9 +1346,35 @@ impl App {
                 self.document.remove_calendar_day_if_empty(date);
                 self.status = Some("Calendar entry deleted".into());
             }
+            DeleteTarget::Judgement(judgement) if judgement < self.document.judgements.len() => {
+                self.document.judgements.remove(judgement);
+                self.selected_judgement =
+                    judgement.min(self.document.judgements.len().saturating_sub(1));
+                self.selected_characteristic = None;
+                self.judgement_focus = JudgementFocus::Judgements;
+                self.status = Some("Judgement deleted".into());
+            }
+            DeleteTarget::Characteristic(judgement, characteristic)
+                if self
+                    .document
+                    .judgements
+                    .get(judgement)
+                    .is_some_and(|value| characteristic < value.characteristics.len()) =>
+            {
+                let characteristics = &mut self.document.judgements[judgement].characteristics;
+                characteristics.remove(characteristic);
+                self.selected_judgement = judgement;
+                self.selected_characteristic = if characteristics.is_empty() {
+                    None
+                } else {
+                    Some(characteristic.min(characteristics.len() - 1))
+                };
+                self.status = Some("Characteristic deleted".into());
+            }
             _ => {}
         }
         self.ensure_visible_selection();
+        self.ensure_judgement_selection();
     }
 
     fn select_up(&mut self) {
@@ -1050,6 +1485,71 @@ impl App {
         true
     }
 
+    fn select_judgement_row(&mut self, direction: isize) {
+        match self.judgement_focus {
+            JudgementFocus::Judgements => {
+                let len = self.document.judgements.len();
+                if len == 0 {
+                    return;
+                }
+                self.selected_judgement = adjacent_index(self.selected_judgement, len, direction);
+                self.selected_characteristic = None;
+                self.characteristic_scroll = 0;
+            }
+            JudgementFocus::Characteristics => {
+                let len = self
+                    .selected_judgement()
+                    .map_or(0, |judgement| judgement.characteristics.len());
+                if len == 0 {
+                    self.selected_characteristic = None;
+                    return;
+                }
+                self.selected_characteristic = Some(adjacent_index(
+                    self.selected_characteristic.unwrap_or(0),
+                    len,
+                    direction,
+                ));
+            }
+        }
+    }
+
+    fn move_judgement_selection(&mut self, direction: isize) -> bool {
+        match self.judgement_focus {
+            JudgementFocus::Judgements => {
+                let len = self.document.judgements.len();
+                if len == 0 {
+                    return false;
+                }
+                let destination = bounded_destination(self.selected_judgement, len, direction);
+                let Some(destination) = destination else {
+                    return false;
+                };
+                self.document
+                    .judgements
+                    .swap(self.selected_judgement, destination);
+                self.selected_judgement = destination;
+                true
+            }
+            JudgementFocus::Characteristics => {
+                let Some(index) = self.selected_characteristic else {
+                    return false;
+                };
+                let Some(judgement) = self.document.judgements.get_mut(self.selected_judgement)
+                else {
+                    return false;
+                };
+                let Some(destination) =
+                    bounded_destination(index, judgement.characteristics.len(), direction)
+                else {
+                    return false;
+                };
+                judgement.characteristics.swap(index, destination);
+                self.selected_characteristic = Some(destination);
+                true
+            }
+        }
+    }
+
     fn change_month(&mut self, direction: isize) {
         let target = if direction < 0 {
             self.displayed_month.checked_sub_months(Months::new(1))
@@ -1153,6 +1653,28 @@ impl App {
             self.selected_calendar_entry = None;
         }
     }
+
+    fn ensure_judgement_selection(&mut self) {
+        if self.document.judgements.is_empty() {
+            self.selected_judgement = 0;
+            self.selected_characteristic = None;
+            self.judgement_focus = JudgementFocus::Judgements;
+            self.judgement_scroll = 0;
+            self.characteristic_scroll = 0;
+            return;
+        }
+        self.selected_judgement = self
+            .selected_judgement
+            .min(self.document.judgements.len() - 1);
+        let characteristic_count = self.document.judgements[self.selected_judgement]
+            .characteristics
+            .len();
+        if characteristic_count == 0 {
+            self.selected_characteristic = None;
+        } else if let Some(characteristic) = self.selected_characteristic {
+            self.selected_characteristic = Some(characteristic.min(characteristic_count - 1));
+        }
+    }
 }
 
 pub fn days_in_month(month: NaiveDate) -> u32 {
@@ -1196,6 +1718,69 @@ fn adjacent_mood(mood: MoodRating, direction: isize) -> MoodRating {
         (position + 1).min(MoodRating::ALL.len() - 1)
     };
     MoodRating::ALL[next]
+}
+
+fn sentiment_index(sentiment: Sentiment) -> usize {
+    Sentiment::ALL
+        .iter()
+        .position(|candidate| *candidate == sentiment)
+        .unwrap_or(1)
+}
+
+fn adjacent_index(index: usize, len: usize, direction: isize) -> usize {
+    if direction < 0 {
+        index.saturating_sub(1)
+    } else {
+        (index + 1).min(len.saturating_sub(1))
+    }
+}
+
+fn bounded_destination(index: usize, len: usize, direction: isize) -> Option<usize> {
+    let destination = adjacent_index(index, len, direction);
+    (destination != index).then_some(destination)
+}
+
+fn next_characteristic_field(field: CharacteristicField, direction: isize) -> CharacteristicField {
+    let fields = [
+        CharacteristicField::Name,
+        CharacteristicField::BeforeText,
+        CharacteristicField::BeforeRating,
+        CharacteristicField::AfterText,
+        CharacteristicField::AfterRating,
+    ];
+    let index = fields
+        .iter()
+        .position(|candidate| *candidate == field)
+        .unwrap_or(0);
+    let next = if direction < 0 {
+        index.checked_sub(1).unwrap_or(fields.len() - 1)
+    } else {
+        (index + 1) % fields.len()
+    };
+    fields[next]
+}
+
+fn update_sentiment(sentiment: &mut Sentiment, key: KeyEvent) -> bool {
+    let selected = match key.code {
+        KeyCode::Char('+') => Some(Sentiment::Positive),
+        KeyCode::Char('0') => Some(Sentiment::Neutral),
+        KeyCode::Char('-') => Some(Sentiment::Negative),
+        KeyCode::Left | KeyCode::Up => {
+            let index = sentiment_index(*sentiment);
+            Some(Sentiment::ALL[index.saturating_sub(1)])
+        }
+        KeyCode::Right | KeyCode::Down => {
+            let index = sentiment_index(*sentiment);
+            Some(Sentiment::ALL[(index + 1).min(Sentiment::ALL.len() - 1)])
+        }
+        _ => None,
+    };
+    if let Some(selected) = selected {
+        *sentiment = selected;
+        true
+    } else {
+        false
+    }
 }
 
 fn edit_text(editor: &mut Editor, key: KeyEvent) {
@@ -1253,6 +1838,12 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
+    fn type_text(app: &mut App, value: &str) {
+        for character in value.chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+    }
+
     fn app() -> App {
         App::new(Document {
             version: DATA_VERSION,
@@ -1281,6 +1872,7 @@ mod tests {
                 },
             ],
             calendar: Calendar::default(),
+            judgements: Vec::new(),
         })
     }
 
@@ -1607,5 +2199,147 @@ mod tests {
         assert_eq!(forever.counts, [1, 1, 1, 1, 1]);
         assert_eq!(forever.rated_days, 5);
         assert_eq!(forever.average(), Some(3.0));
+    }
+
+    #[test]
+    fn creates_and_verifies_a_judgement_characteristic() {
+        let mut app = App::new(Document::default());
+        app.handle_key(key(KeyCode::Char('4')));
+        assert_eq!(app.feature, Feature::Judgements);
+
+        app.handle_key(key(KeyCode::Char('n')));
+        type_text(&mut app, "New role");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "After one year");
+        assert!(app.handle_key(key(KeyCode::Enter)).changed);
+        assert_eq!(app.document.judgements[0].follow_up, "After one year");
+
+        app.handle_key(key(KeyCode::Char('a')));
+        type_text(&mut app, "Autonomy");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "Expected freedom");
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('+')));
+        assert!(app.handle_key(key(KeyCode::Enter)).changed);
+        assert_eq!(
+            app.document.judgements[0].characteristics[0].before.rating,
+            Sentiment::Positive
+        );
+        assert!(
+            app.document.judgements[0].characteristics[0]
+                .after
+                .is_none()
+        );
+
+        app.handle_key(key(KeyCode::Char('v')));
+        type_text(&mut app, "Some constraints");
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('-')));
+        assert!(app.handle_key(key(KeyCode::Enter)).changed);
+        assert_eq!(
+            app.document.judgements[0].characteristics[0]
+                .after
+                .as_ref()
+                .unwrap()
+                .rating,
+            Sentiment::Negative
+        );
+
+        let statistics = app.judgement_statistics();
+        assert_eq!(statistics.before_counts, [1, 0, 0]);
+        assert_eq!(statistics.after_counts, [0, 0, 1]);
+        assert_eq!(statistics.characteristics, 1);
+        assert_eq!(statistics.verified, 1);
+    }
+
+    #[test]
+    fn incomplete_after_observation_is_not_committed() {
+        let mut app = App::new(Document::default());
+        app.document.judgements.push(Judgement {
+            name: "Laptop".into(),
+            follow_up: String::new(),
+            characteristics: vec![Characteristic {
+                name: "Battery".into(),
+                before: Observation {
+                    text: "Expected all day".into(),
+                    rating: Sentiment::Positive,
+                },
+                after: None,
+            }],
+        });
+        app.feature = Feature::Judgements;
+        app.judgement_focus = JudgementFocus::Characteristics;
+        app.selected_characteristic = Some(0);
+
+        app.handle_key(key(KeyCode::Char('v')));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('-')));
+        assert!(!app.handle_key(key(KeyCode::Enter)).changed);
+        assert!(matches!(app.mode, Mode::EditingCharacteristic(_)));
+        assert!(
+            app.document.judgements[0].characteristics[0]
+                .after
+                .is_none()
+        );
+
+        assert!(!app.handle_key(ctrl(KeyCode::Char('x'))).changed);
+        assert!(!app.handle_key(key(KeyCode::Enter)).changed);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn judgement_statistics_exclude_unverified_rows_from_after_percentages() {
+        let mut app = App::new(Document::default());
+        app.document.judgements.push(Judgement {
+            name: "Investigation".into(),
+            follow_up: "After research".into(),
+            characteristics: vec![
+                Characteristic {
+                    name: "First".into(),
+                    before: Observation {
+                        text: "Promising".into(),
+                        rating: Sentiment::Positive,
+                    },
+                    after: Some(Observation {
+                        text: "Average".into(),
+                        rating: Sentiment::Neutral,
+                    }),
+                },
+                Characteristic {
+                    name: "Second".into(),
+                    before: Observation {
+                        text: "Concerning".into(),
+                        rating: Sentiment::Negative,
+                    },
+                    after: None,
+                },
+            ],
+        });
+
+        let statistics = app.judgement_statistics();
+        assert_eq!(statistics.before_counts, [1, 0, 1]);
+        assert_eq!(statistics.after_counts, [0, 1, 0]);
+        assert_eq!(statistics.characteristics, 2);
+        assert_eq!(statistics.verified, 1);
+    }
+
+    #[test]
+    fn reorders_and_deletes_judgement_content() {
+        let mut app = App::new(Document::default());
+        for name in ["First", "Second"] {
+            app.document.judgements.push(Judgement {
+                name: name.into(),
+                follow_up: String::new(),
+                characteristics: Vec::new(),
+            });
+        }
+        app.feature = Feature::Judgements;
+
+        assert!(app.handle_key(ctrl(KeyCode::Down)).changed);
+        assert_eq!(app.document.judgements[1].name, "First");
+        app.handle_key(key(KeyCode::Char('d')));
+        assert!(app.handle_key(key(KeyCode::Char('y'))).changed);
+        assert_eq!(app.document.judgements.len(), 1);
+        assert_eq!(app.selected_judgement, 0);
     }
 }

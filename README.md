@@ -1,8 +1,8 @@
 # who-me
 
-`who-me` is a keyboard-first terminal dashboard with three features: **Identities**, **Calendar**, and **Statistics**. Create identity topics, plan daily checklist entries, rate how each day felt, and see how those ratings develop over time.
+`who-me` is a keyboard-first terminal dashboard with four features: **Identities**, **Calendar**, **Statistics**, and **Judgements**. Create identity topics, plan daily checklist entries, track moods, and compare what you expected with what you later learned.
 
-The dashboard is deliberately small in scope: editable text, completion state, identity lifecycle, reordering, search, and daily planning. Mark identities as **Aspiring**, **Active**, or **Former** as they evolve. The Calendar keeps the full month visible while the selected day's checklist sits beside it or stacks below it on narrow terminals. Identity cards adapt from one to four columns, and all three features follow the active color palette.
+The dashboard is deliberately small in scope: editable text, completion state, identity lifecycle, reordering, search, daily planning, and before/after comparisons. Mark identities as **Aspiring**, **Active**, or **Former** as they evolve. The Calendar keeps the full month visible while the selected day's checklist sits beside it or stacks below it on narrow terminals. Identity cards adapt from one to four columns, and all four features follow the active color palette.
 
 `who-me` follows the complete active Omarchy palette when one is available and falls back to a bundled true-color theme elsewhere. Symbols and colors are generated at runtime, so the data file remains simple text with no presentation settings.
 
@@ -25,7 +25,7 @@ cargo run
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` / `3` | Switch between Identities, Calendar, and Statistics |
+| `1` / `2` / `3` / `4` | Switch between Identities, Calendar, Statistics, and Judgements |
 | `↑` / `↓` | Move through identity titles and entries |
 | `←` / `→`, `Tab` | Move between topics |
 | `t` | Add a topic |
@@ -46,6 +46,10 @@ In Calendar, arrow keys move between days in the month grid or between entries i
 
 Statistics summarizes rated days through today. Press `m` for the rolling last 30 days, `y` for the rolling last 365 days, or `f` for all recorded history. Each view shows the average rating and the count and percentage for every mood level.
 
+In Judgements, each named subject contains characteristics with a required **before** note and rating, plus an optional **after** note and rating once verified. Ratings are **Positive**, **Neutral**, or **Negative**. The selected judgement shows separate before and after distributions; unverified characteristics are excluded from the after percentages.
+
+Press `n` to create a judgement, `a` to add a characteristic, and `v` to verify the selected characteristic. `Tab` switches focus between the judgement list and its characteristics, `Enter` edits the focused item, `d` deletes it, and `Ctrl` + `↑` / `↓` reorders the focused list. Forms use `Tab` to move between fields and `+`, `0`, or `-` to choose a rating. `Ctrl` + `x` clears an after observation while editing.
+
 ## Data
 
 Data is saved after every confirmed change in:
@@ -57,7 +61,7 @@ $XDG_DATA_HOME/who-me/data.toml
 When `XDG_DATA_HOME` is unset, the path is `~/.local/share/who-me/data.toml`. The file is intentionally readable and can be edited while the app is closed:
 
 ```toml
-version = 3
+version = 4
 
 [[topics]]
 name = "Developer"
@@ -78,9 +82,24 @@ mood = 4
 [[calendar.days.entries]]
 text = "Submit the monthly report"
 done = false
+
+[[judgements]]
+name = "New role"
+follow_up = "After one year"
+
+[[judgements.characteristics]]
+name = "Autonomy"
+
+[judgements.characteristics.before]
+text = "Expected a lot of freedom"
+rating = "positive"
+
+[judgements.characteristics.after]
+text = "Freedom came with some constraints"
+rating = "neutral"
 ```
 
-Identity statuses are `aspiring`, `active`, and `former`. Mood ratings are integers from 1 through 5. Calendar dates with neither entries nor a mood are omitted. Version 1 and 2 files are upgraded automatically; the original is retained in `data.toml.bak`. Older identities without a status remain valid and load as `active`.
+Identity statuses are `aspiring`, `active`, and `former`. Mood ratings are integers from 1 through 5. Judgement ratings are `positive`, `neutral`, and `negative`. Calendar dates with neither entries nor a mood are omitted. Version 1, 2, and 3 files are upgraded automatically; the original is retained in `data.toml.bak`. Older identities without a status remain valid and load as `active`.
 
 Writes use a temporary file and atomic rename. Before an existing file is replaced, its previous contents are copied to `data.toml.bak`. If the main file is malformed, `who-me` reports the exact problem and does not overwrite it.
 
@@ -90,7 +109,7 @@ Press `g` to connect a dedicated private GitHub repository. The repository must 
 
 Sync commits use your normal Git author identity (`user.name` and `user.email`).
 
-The local `data.toml` remains the working copy and is always saved first. A background worker synchronizes the repository's root `data.toml`, including identities, calendar entries, and mood ratings, after edits, at startup, and periodically while the app is open. If the network is unavailable, editing continues and pending changes retry automatically.
+The local `data.toml` remains the working copy and is always saved first. A background worker synchronizes the repository's root `data.toml`, including identities, calendar entries, mood ratings, and judgements, after edits, at startup, and periodically while the app is open. If the network is unavailable, editing continues and pending changes retry automatically.
 
 When both local and GitHub data changed and Git cannot merge them, the header shows **Conflict**. Open settings with `g` and choose either `l` to keep the current local document or `h` to use GitHub. Both versions are backed up under `$XDG_DATA_HOME/who-me/conflicts/` before resolution.
 
